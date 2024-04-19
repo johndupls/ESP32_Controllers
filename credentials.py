@@ -1,0 +1,2 @@
+WIFI_NAME = 'bdupls'
+WIFI_PASS = "75D52CC27AAC@109"
