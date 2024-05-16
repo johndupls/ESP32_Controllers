@@ -1,7 +1,7 @@
 """
     Pond Warmer Controller with Wi-Fi V1.3
     Date:2024-01-19
-    Static IP Address: 192.168.2.32
+    Static IP Address: 192.168.2.49
     Updates: Test button, 30 second 'ON' test
                      Timer activated - used for decrementing  all counters
                      RTC enabled & used for time, time received from NTP server
