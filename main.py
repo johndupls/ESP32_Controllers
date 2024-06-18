@@ -1,11 +1,15 @@
 """
-    Pond Warmer Controller with Wi-Fi V1.4
-    Date:2024-05-16
-    Static IP Address: 192.168.2.49
+    Pond Warmer Controller with Wi-Fi (New Version....)
+    Version: V1.4
+    Date:2024-06-18
+    Static IP Address: 192.168.2.32
+                                     (192.168.2.49 Debug board)
     Updates: Test button, 30 second 'ON' test
                      Timer activated - used for decrementing  all counters
-                     RTC enabled & used for time, time received from NTP server
+                     RTC enabled & used for time (time sourced from NTP server)
                      Controller includes relay to power 500W AC heater
+                     ESP resets after 10 attempts to connect to WiFi
+                     Client refresh time constant added. Set to 30secs
 """
 
 # Imports
@@ -13,14 +17,14 @@ import time
 import network
 import ntptime
 import uasyncio as asyncio
+import machine
 from machine import Pin, I2C, WDT, Timer, RTC
 import bme280
 import sys
 from credentials import WIFI_NAME, WIFI_PASS
-import esp32
 
 # Const declarations
-FIRMWARE_VERSION = '1.3'
+FIRMWARE_VERSION = '1.4'
 INTERVAL_SEC = 0.25
 LOOP_REFRESH_SEC = 1.0
 ON = 1
@@ -33,8 +37,9 @@ HEATER_TIMER_RUNNING = 1
 HEATER_TIMER_STOPPED = 0
 HEATER_ON_TEMP = 1.2  # Actual1.2, debug 25.0 Deg C
 HEATER_OFF_TEMP = 5.0  # Actual5.0, debug 30.0 Deg C
-UTC_OFFSET = 5 * 60 * 60  # Seconds, Ottawa offset = 5
+UTC_OFFSET = 4 * 60 * 60  # Seconds, Ottawa offset = 4/5
 HEATER_TEST_PERIOD = 30  # Seconds
+CLIENT_REFRESH_PERIOD = 30 # Seconds
 CTRL_LIVE_PERIOD = 15 # 15 Seconds
 
 # Global timer variables
@@ -42,7 +47,6 @@ timer_tick = False
 first_pass = False
 local_time = ''
 ctrl_live_counter = 30 #Seconds
-
 
 # Global sensor data variables
 amb_temp = ""
@@ -87,6 +91,8 @@ heater_tempWindow_status = ''  # Shows the state of the temperature window for h
 ip_addr = ''
 wlan_connect_time = ''  # Time and date connected to network
 server_connect_state = False  # False indicates server disconnected
+notConnectedCounter = 0 # Number of re-connect attempts
+wlan_reconnect = False
 
 # I2C device addresses
 bmp_addr1 = 0x76  # BMP280 address 1
@@ -98,11 +104,11 @@ status_led = Pin(33, Pin.OUT, value=1)  # LED off
 status_led_state = ''  # LED state "ON" or "OFF"
 
 # Create heater object
-heater = Pin(5, Pin.OUT, value=0)  # GPIO5 actual controller, GPIO32 debug board, heater OFF
+heater = Pin(5, Pin.OUT, value=0)  # GPIO5 actual controller
 
 # Create WLAN object
 wlan_connected = False
-WLAN_TIMEOUT = 20  # Number of attempts to reconnect. Period = WLAN_TIMEOUT * LOOP_REFRESH_SEC
+WLAN_TIMEOUT = 20  # Number of attempts to connect. Period = WLAN_TIMEOUT * LOOP_REFRESH_SEC
 wlan = network.WLAN(network.STA_IF)
 
 # Create I2C1 object
@@ -121,7 +127,6 @@ rtc = RTC()
 # Configure WiFi credentials
 ssid = WIFI_NAME
 password = WIFI_PASS
-
 
 #Cold start variable setup
 def setup_variables():
@@ -169,7 +174,7 @@ def setup_variables():
     heater_onPeriodCntr_secs = heater_onPeriod_secs  # Counts down from a preset heater_onPeriod_hrs value during heater on (seconds)
     heater_offPeriodCntr_secs = heater_offPeriod_secs  # Counts down from a preset heater_offPeriod_hrs value during heater off (seconds)
 
-    heater_enabled_time = '...'  # Date and time heater is activated
+    heater_enabled_time = 'Enabled by default'  # Date and time heater is activated
     heater_disabled_time = '...'  # Date and time heater is deactivated
 
     heater_swon_time = '...'  # Time and date when the heater is turned on
@@ -226,7 +231,7 @@ def webpage(amb_temp, pressure,
                 <meta name="viewport" content="width=device-width, initial-scale=1">
                 <link rel="icon" href="data:,">
                 <title>Pond Heater Monitor</title>
-                <meta http-equiv="refresh" content="15">
+                <meta http-equiv="refresh" content={CLIENT_REFRESH_PERIOD}>
                 <!--meta http-equiv="refresh" content="15; URL=192.168.2.30"/-->
             </head>
                
@@ -411,6 +416,8 @@ def test_I2C():
 
 # Flash LED at rate defined
 def blink_led(frequency=0.5, num_blinks=3):
+    global status_led_state
+
     for _ in range(num_blinks):
         status_led.off()  # Inverted, LED on
         status_led_state = "ON"
@@ -457,6 +464,8 @@ def check_temp_window():
 
 
 def setup_RTC():
+    global local_time
+    
     try:
         # Update the  RTC with NTP server time
         ntptime.settime()
@@ -468,10 +477,10 @@ def setup_RTC():
         sec = ntptime.time()
 
         # Calculate delta between epoch and local time zone time
-        sec = int(sec - UTC_OFFSET)  # offset  = local time zone in hours * 60 * 60
+        delta = int(sec - UTC_OFFSET)  # offset  = local time zone in hours * 60 * 60
 
         # Adjust local time
-        local_time = time.localtime(sec)  # (year, month, day, hours, minutes, seconds, weekday, yearday)
+        local_time = time.localtime(delta)  # (year, month, day, hours, minutes, seconds, weekday, yearday)
         # print("Local time : ", local_time)
 
         # Write RTC
@@ -507,7 +516,6 @@ async def connect_to_wifi():
     # Handle connection error
     if wlan.status() != 1010:
         blink_led(0.1, 5)
-        # raise RuntimeError('WiFi connection failed')
         wlan_connected = False
         await asyncio.sleep(2)  # 2sec
     else:
@@ -529,7 +537,7 @@ async def connect_to_wifi():
         ip_addr = status[0]
         print('...IP Addr = {}\n'.format(ip_addr))
         wlan_connected = True
-        wdt.feed()  # Keep watch dog from triggering
+    wdt.feed()  # Keep watch dog from triggering
 
 
 # Client handler
@@ -591,6 +599,7 @@ async def serve_client(reader, writer):
         stateis = "Heater disabled"
         # print(stateis)
         heater_enabled = 'DISABLED'  # Clear flag
+        heater_disabled_time = "{}:{}:{}".format(local_time[4], local_time[5], local_time[6])  # Get RTC time
         enable_color = 'grey'
         disable_color = 'green'
         blink_led(0.1, 2)
@@ -599,6 +608,7 @@ async def serve_client(reader, writer):
         stateis = "Heater enabled"
         # print(stateis)
         heater_enabled = 'ENABLED'  # Set flag
+        heater_enabled_time = "{}:{}:{}".format(local_time[4], local_time[5], local_time[6])  # Get RTC time
         enable_color = 'red'
         disable_color = 'grey'
         blink_led(0.1, 2)
@@ -671,14 +681,12 @@ async def serve_client(reader, writer):
 
     await writer.drain()
     await writer.wait_closed()
-
+    print("Client disconnected")
 
 # Turn heater element off
 def heater_off():
     global heater_state
     global heater_timer_status
-    global heater_offPeriodCntr_secs
-    global heater_onPeriodCntr_secs
 
     heater_state = 'OFF'
     heater.off() 
@@ -727,6 +735,9 @@ async def main():
     global first_pass
     global local_time
     global ctrl_live_counter
+    global status_led_state
+    global wlan_reconnect
+    global notConnectedCounter
 
     # Start timer 0
     tim0.init(period=1000, mode=Timer.PERIODIC, callback=tim0_callback)
@@ -772,8 +783,10 @@ async def main():
 
         if not wlan_connected:
             print('Connecting to WiFi')
+            if wlan_reconnect == True:
+                notConnectedCounter += 1
             asyncio.create_task(connect_to_wifi())
-
+            
         if wlan_connected and (server_connect_state == False):
             '''
                 Start a TCP server on the given host and port. The callback will be called with incoming, accepted connections,
@@ -794,7 +807,6 @@ async def main():
             blink_led(frequency=0.05, num_blinks=1) #Flash LED
             ctrl_live_counter = CTRL_LIVE_PERIOD #Preset counter
 
-        
         # Refresh data
         if sensor_status == 'Sensor active':
             get_sensor_data(bmp)
@@ -844,11 +856,11 @@ async def main():
             result = "{}:{}:{}".format(local_time[4], local_time[5], local_time[6])  # Get RTC time
             if result == '':
                 heater_swon_time = 'Time unavailable...'
-                heater_enabled_time = 'Time unavailable...'
+                #heater_enabled_time = 'Time unavailable...'
             else:
                 heater_swon_time = result
                 heater_enabled_time = result
-            heater_disabled_time = '...'
+            #heater_disabled_time = '...'
             heater_swoff_time = '...'
 
             # print("Heater started",heater_swon_time)
@@ -865,7 +877,7 @@ async def main():
                 heater_swoff_time = 'Time unavailable...'
             else:
                 heater_swoff_time = result
-            heater_on_message = 'turned on at'
+            heater_on_message = "Off" #'turned on at'
             heater_off_message = 'Temperature too high...element turned off at!'
             heater_timer_status = 'HEATER_TIMER_STOPPED'
             # print("Heater ENABLED, heater OFF, heater state == ON/OFF, heater temp window above max threshold")
@@ -933,15 +945,19 @@ async def main():
                 heater_onPeriodCntr_secs = heater_onPeriod_secs  # Cntr preset
                 # heater_disabled_time = ''
 
-        if wlan.isconnected() == False:
-            print('Network disconnected...')
+        if wlan.isconnected() == False: # Check if wlan connected
             await asyncio.sleep(5)  # 5sec
-            print('Confirming network disconnected')
             if wlan.isconnected() == False:  # Confirm disconnected
+                print('Network disconnected...')
                 # Config for retry
                 wlan_connected = False  # Re-connect flag cleared
                 server_connect_state = False  # Server flag cleared
-
+                wlan_reconnect = True # Indicate re connection is required
+                if notConnectedCounter > 10: # Check re-connect timeout counter
+                    print("Resetting ESP32...")
+                    time.sleep(2)
+                    machine.reset() # Reset ESP
+                
         wdt.feed()  # Keep watch dog from triggering every second
     # loop...
 
