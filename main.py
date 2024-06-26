@@ -2,7 +2,7 @@
 """
     Pond Warmer Controller with Wi-Fi 
     Version: V1.4
-    Date:2024-06-13
+    Date:2024-06-26
     Static IP Address: 192.168.2.32
                                      (192.168.2.49 Debug board)
     Updates: Test button, 30 second 'ON' test
@@ -11,6 +11,7 @@
                      Controller includes relay to power 500W AC heater
                      ESP resets after 10 attempts to connect to WiFi
                      Client refresh time constant added. Set to 30secs
+                     Add humidity and dew point to client web page
 """
 
 # Imports
@@ -53,6 +54,7 @@ ctrl_live_counter = 30 #Seconds
 amb_temp = ""
 pressure = ""
 humidity = ""
+dew_point = ""
 sensor_status = 'Unknown'
 
 # Global startup variable
@@ -214,7 +216,7 @@ def tim0_callback(tim0):
 
 
 # Create server webpage
-def webpage(amb_temp, pressure,
+def webpage(amb_temp, pressure, humidity, dew_point,
             heater_state, heater_enabled,
             heater_on_message, heater_off_message,
             heater_clientOnPeriod_hrs, heater_clientOffPeriod_hrs,
@@ -240,10 +242,11 @@ def webpage(amb_temp, pressure,
             <p><center><h2>Pond Water Heater Monitor {FIRMWARE_VERSION}</h2></center></p>
             
             <p><center>Local Date: <em>{local_time[0]}:{local_time[1]}:{local_time[2]}</em> &nbsp Local Time: <em>{local_time[4]}:{local_time[5]}:{local_time[6]}</em></center></p>
-            
+
             <p><center><h3>Sensor Data</center></h3></p>            
             <p><center>Temperature:<em> {amb_temp}DegC</em> &nbsp Pressure:<em> {pressure}</em></center></p>
-            
+            <p><center>Humidity:<em> {humidity}&percnt;</em> &nbsp Dew point:<em> {dew_point}DegC</em></center></p>
+
             <center><h3>Heater State</h3></center>
             <p><center>Heater Enabled: <em>{heater_enabled}</em> &nbsp Heater State: <em>{heater_state}</em></center></p>
             <p><center>Heater enabled at: <em>{heater_enabled_time} </em> &nbsp Heater disabled at: <em>{heater_disabled_time}</em></center></p> 
@@ -436,19 +439,33 @@ def get_sensor_data(bmp):
     global sensor_status
 
     try:
-        # Get sensor data
+        # Get sensor temperature data
         t = bmp.values[0]
         t = t.split('C')  # Remove 'C'
         t = t[0]  # Get only the number
         amb_temp = t
 
+        # Get sensor pressure data
         pressure = bmp.values[1]
-        # humidity = bmp.values[2]
+
+        # Get sensor humidity data
+        #humidity = bmp.values[2]
+        humidity = "52.3"
+
         sensor_status = 'Sensor active'
     except:
         print("Temp sensor error...")
         sensor_status = 'Sensor error'
 
+def dew_point_calc():
+    global amb_temp
+    global humidity
+    global dew_point
+    temp = 0.0
+
+    temp = float(amb_temp) - ((100-float(humidity))/5)
+    temp = round(temp,2)
+    dew_point = str(temp)
 
 # Turn heater on/off depending on temperature
 def check_temp_window():
@@ -545,6 +562,8 @@ async def connect_to_wifi():
 async def serve_client(reader, writer):
     global amb_temp
     global pressure
+    global humidity
+    global dew_point
     global heater_state
     global heater_test
     global heater_enabled
@@ -668,7 +687,7 @@ async def serve_client(reader, writer):
     wdt.feed()  # Keep watch dog from triggering every second
 
     response = webpage(
-        amb_temp, pressure,
+        amb_temp, pressure, humidity, dew_point,
         heater_state, heater_enabled,
         heater_on_message, heater_off_message,
         heater_clientOnPeriod_hrs, heater_clientOffPeriod_hrs,
@@ -766,6 +785,7 @@ async def main():
     # Get data
     if sensor_status == 'Sensor active':
         get_sensor_data(bmp)
+        dew_point_calc()    # Calculate dew point
     elif sensor_status == 'Sensor error':
         time.sleep(2)  # 2sec
         get_sensor_data(bmp)  # Try again
@@ -803,7 +823,7 @@ async def main():
         # Update RTC  global storage variable
         local_time = rtc.datetime()
         
-        #Check contoller alive counter
+        #Check controller alive counter
         if ctrl_live_counter == 0 :
             blink_led(frequency=0.05, num_blinks=1) #Flash LED
             ctrl_live_counter = CTRL_LIVE_PERIOD #Preset counter
@@ -811,6 +831,7 @@ async def main():
         # Refresh data
         if sensor_status == 'Sensor active':
             get_sensor_data(bmp)
+            dew_point_calc()
         elif sensor_status == 'Sensor error':
             time.sleep(2)  # 2sec
             get_sensor_data(bmp)  # Try again
