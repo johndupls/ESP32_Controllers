@@ -1,10 +1,9 @@
-
 """
     Pond Warmer Controller with Wi-Fi 
     Version: V1.4
-    Date:2024-06-26
+    Date:2024-07-04
     Static IP Address: 192.168.2.32
-                                     (192.168.2.49 Debug board)
+    
     Updates: Test button, 30 second 'ON' test
                      Timer activated - used for decrementing  all counters
                      RTC enabled & used for time (time sourced from NTP server)
@@ -12,6 +11,7 @@
                      ESP resets after 10 attempts to connect to WiFi
                      Client refresh time constant added. Set to 30secs
                      Add humidity and dew point to client web page
+                     Add OTA programming
 """
 
 # Imports
@@ -68,7 +68,7 @@ disable_color = 'grey'
 heater_onPeriod_secs = 0  # Holds the time in seconds the heater will turn on (seconds)
 heater_offPeriod_secs = 0  # Holds the time in seconds the heater will turn off (seconds)
 
-heater_onPeriod_hrs = 2.0  # Period for which the heater turns on (hours)  default=2 (hours)
+heater_onPeriod_hrs = 4.0  # Period for which the heater turns on (hours)  default=4 (hours)
 heater_offPeriod_hrs = 1.0  # Period for which the heater turns on (hours)  default=1 (hours)
 
 heater_clientOnPeriod_hrs = 0.0  # Heater on period input by client (hours)
@@ -88,6 +88,8 @@ heater_off_message = ''  # Indicates if heater has 'TURNED OFF'
 heater_timer_status = ''  # Heater timer flag, indicates HEATER_TIMER_RUNNING or HEATER_TIMER_STOPPED
 heater_enabled = 'DISABLED'  # Heater will turn off automatically if this flag is false "DISABLED"
 heater_test = 'DISABLED'  # Heater will turn on for set time irrespective of heater_enable or temperature
+heater_enabled_message = ''
+heater_disabled_message = ''
 heater_tempWindow_status = ''  # Shows the state of the temperature window for heater turn on "TEMP GOOD" or off "TEMP TOO HIGH"
 
 # Global WLAN variables
@@ -100,7 +102,7 @@ wlan_reconnect = False
 # I2C device addresses
 bmp_addr1 = 0x76  # BMP280 address 1
 bmp_addr2 = 0x77  # BMP280 alternative address 2
-num_I2C_devices = 0  # Number of I2C devices detected
+num_i2c_devices = 0  # Number of I2C devices detected
 
 # Create LED object
 status_led = Pin(33, Pin.OUT, value=1)  # LED off
@@ -115,8 +117,8 @@ WLAN_TIMEOUT = 20  # Number of attempts to connect. Period = WLAN_TIMEOUT * LOOP
 wlan = network.WLAN(network.STA_IF)
 
 # Create I2C1 object
-I2C1 = I2C(1, scl=Pin(22), sda=Pin(21))
-I2C_devices = bytearray()  # Devices storage array
+i2c1 = I2C(1, scl=Pin(22), sda=Pin(21))
+i2c_devices = bytearray()  # Devices storage array
 
 # Create WDT object
 wdt = WDT(timeout=30000)  # 30000mSecs timeout
@@ -148,9 +150,6 @@ def setup_variables():
     global heater_swon_time
     global heater_swoff_time
 
-    global heater_onPeriod_hrs
-    global heater_offPeriod_hrs
-
     global heater_state
     global heater_on_message
     global heater_off_message
@@ -166,8 +165,6 @@ def setup_variables():
     global enable_color
     global disable_color
 
-    global first_pass
-
     heater_onPeriod_secs = 7200  # Holds default heater on value of '2hrs' in seconds
     heater_offPeriod_secs = 3600  # Holds default heater off value of '1hrs' in seconds
 
@@ -177,7 +174,7 @@ def setup_variables():
     heater_onPeriodCntr_secs = heater_onPeriod_secs  # Counts down from a preset heater_onPeriod_hrs value during heater on (seconds)
     heater_offPeriodCntr_secs = heater_offPeriod_secs  # Counts down from a preset heater_offPeriod_hrs value during heater off (seconds)
 
-    heater_enabled_time = 'Enabled by default'  # Date and time heater is activated
+    heater_enabled_time = 'start'  # Date and time heater is activated
     heater_disabled_time = '...'  # Date and time heater is deactivated
 
     heater_swon_time = '...'  # Time and date when the heater is turned on
@@ -188,6 +185,8 @@ def setup_variables():
     heater_off_message = 'TURNED OFF'  # Indicates heater has 'TURNED OFF'
     heater_timer_status = 'HEATER_TIMER_STOPPED'  # Heater timer run flag
     heater_enabled = 'ENABLED'  # Heater enable/disable flag. Set to ENABLE at startup
+    heater_enabled_message = 'Heater enabled at '
+    heater_disabled_message = 'Heater disabled at '
     heater_test = 'DISABLED'  # Heater test flag. Set to DISABLE at startup.
     heater_tempWindow_status = 'TEMP TOO HIGH'  # Heater temperature window flag, turn off heater at startup
 
@@ -195,7 +194,7 @@ def setup_variables():
     wlan_connect_time = '...'
     server_connect_state = False
 
-    enable_color = 'red'
+    enable_color = 'green'
     disable_color = 'grey'
 
 
@@ -218,7 +217,7 @@ def tim0_callback(tim0):
 # Create server webpage
 def webpage(amb_temp, pressure, humidity, dew_point,
             heater_state, heater_enabled,
-            heater_on_message, heater_off_message,
+            heater_on_message, heater_off_message, heater_enabled_message, heater_disabled_message,
             heater_clientOnPeriod_hrs, heater_clientOffPeriod_hrs,
             heater_enabled_time, heater_disabled_time,
             heater_swon_time, heater_swoff_time,
@@ -249,8 +248,8 @@ def webpage(amb_temp, pressure, humidity, dew_point,
 
             <center><h3>Heater State</h3></center>
             <p><center>Heater Enabled: <em>{heater_enabled}</em> &nbsp Heater State: <em>{heater_state}</em></center></p>
-            <p><center>Heater enabled at: <em>{heater_enabled_time} </em> &nbsp Heater disabled at: <em>{heater_disabled_time}</em></center></p> 
-            <p><center>Heater {heater_on_message}: <em>{heater_swon_time}</em> &nbsp Heater {heater_off_message}: <em>{heater_swoff_time}</em></center></p>
+            <p><center>{heater_enabled_message} <em>{heater_enabled_time} </em> &nbsp {heater_disabled_message} <em>{heater_disabled_time}</em></center></p> 
+            <p><center>{heater_on_message} <em>{heater_swon_time}</em> &nbsp {heater_off_message} <em>{heater_swoff_time}</em></center></p>
             
             <center><h3>Heater Control</h3></center>
             
@@ -363,10 +362,10 @@ def webpage(amb_temp, pressure, humidity, dew_point,
 
 
 # Search for any devices on bus
-def find_I2C_devices():
+def find_i2c_devices():
     # Scan
     print("Scanning for I2C devices")
-    devices = I2C1.scan()
+    devices = i2c1.scan()
     if len(devices) >= 1:
         print("...{} x I2C devices found".format(len(devices)))
     else:
@@ -376,22 +375,22 @@ def find_I2C_devices():
 
 
 # Create I2C object
-def create_I2C_obj(I2C_devices):
-    if bmp_addr1 in I2C_devices:
+def create_i2c_obj(i2c_devices):
+    if bmp_addr1 in i2c_devices:
         # print("Creating BME instance for {}...\n".format(hex(bmp_addr1)))
-        bmp = bme280.BME280(i2c=I2C1, address=bmp_addr1)  # Create BME280 object
-    elif bmp_addr2 in I2C_devices:
+        bmp = bme280.BME280(i2c=i2c1, address=bmp_addr1)  # Create BME280 object
+    elif bmp_addr2 in i2c_devices:
         # print("Creating BME instance for {}...\n".format(hex(bmp_addr2)))
-        bmp = bme280.BME280(i2c=I2C1, address=bmp_addr2)  # Create BME280 alternate object
-    return bmp #bmp objrct
+        bmp = bme280.BME280(i2c=i2c1, address=bmp_addr2)  # Create BME280 alternate object
+    return bmp #bmp object
 
 
 # Confirm I2C adresses
-def check_I2C_addr(I2C_devices):
-    if I2C_devices == False:
+def check_i2c_addr(i2c_devices):
+    if i2c_devices == False:
         return 0  # No devices found
     else:
-        for d in I2C_devices:  # Iterate through device/s
+        for d in i2c_devices:  # Iterate through device/s
             if d == bmp_addr1:
                 print("...BME280 device found @ address={}\n".format(hex(d)))
                 return 1
@@ -402,14 +401,14 @@ def check_I2C_addr(I2C_devices):
                 return 2  # Unknown address found
 
 
-def test_I2C():
+def test_i2c():
     # Scan for I2C device/s
-    I2C_devices = find_I2C_devices()
+    i2c_devices = find_i2c_devices()
 
     # Compare found I2C devices to expected addresses
-    result = check_I2C_addr(I2C_devices)
+    result = check_i2c_addr(i2c_devices)
     if result == 1:
-        bmp = create_I2C_obj(I2C_devices)
+        bmp = create_i2c_obj(i2c_devices)
         return bmp
     elif result == 0:
         print("No I2C devices found")
@@ -450,8 +449,7 @@ def get_sensor_data(bmp):
 
         # Get sensor humidity data
         #humidity = bmp.values[2]
-        humidity = "52.3"
-
+        humidity = "12.2"
         sensor_status = 'Sensor active'
     except:
         print("Temp sensor error...")
@@ -463,9 +461,10 @@ def dew_point_calc():
     global dew_point
     temp = 0.0
 
-    temp = float(amb_temp) - ((100-float(humidity))/5)
-    temp = round(temp,2)
+    temp = float(amb_temp) - ((100-float(humidity))/5) # Dew point calculation
+    temp = round(temp,2) # Round up number
     dew_point = str(temp)
+    
 
 # Turn heater on/off depending on temperature
 def check_temp_window():
@@ -508,6 +507,7 @@ def setup_RTC():
 
         # RTC value is now set to local time zone
         # print("RTC local time {} \n ".format(rtc.datetime()))
+        return "RTC_good"
     except:
         print("RTC error")
         return False
@@ -576,6 +576,8 @@ async def serve_client(reader, writer):
     global heater_offPeriodCntr_secs
     global heater_on_message
     global heater_off_message
+    global heater_disabled_message
+    global heater_enabled_message
     global heater_swon_time
     global heater_swoff_time
     global heater_clientOnPeriod_hrs
@@ -621,7 +623,7 @@ async def serve_client(reader, writer):
         heater_enabled = 'DISABLED'  # Clear flag
         heater_disabled_time = "{}:{}:{}".format(local_time[4], local_time[5], local_time[6])  # Get RTC time
         enable_color = 'grey'
-        disable_color = 'green'
+        disable_color = 'red'
         blink_led(0.1, 2)
 
     if cmd_enabled == 8:
@@ -629,7 +631,7 @@ async def serve_client(reader, writer):
         # print(stateis)
         heater_enabled = 'ENABLED'  # Set flag
         heater_enabled_time = "{}:{}:{}".format(local_time[4], local_time[5], local_time[6])  # Get RTC time
-        enable_color = 'red'
+        enable_color = 'green'
         disable_color = 'grey'
         blink_led(0.1, 2)
 
@@ -687,14 +689,14 @@ async def serve_client(reader, writer):
     wdt.feed()  # Keep watch dog from triggering every second
 
     response = webpage(
-        amb_temp, pressure, humidity, dew_point,
-        heater_state, heater_enabled,
-        heater_on_message, heater_off_message,
-        heater_clientOnPeriod_hrs, heater_clientOffPeriod_hrs,
-        heater_enabled_time, heater_disabled_time,
-        heater_swon_time, heater_swoff_time,
-        enable_color, disable_color,
-        FIRMWARE_VERSION, local_time) % stateis
+            amb_temp, pressure, humidity, dew_point,
+            heater_state, heater_enabled,
+            heater_on_message, heater_off_message, heater_enabled_message, heater_disabled_message,
+            heater_clientOnPeriod_hrs, heater_clientOffPeriod_hrs,
+            heater_enabled_time, heater_disabled_time,
+            heater_swon_time, heater_swoff_time,
+            enable_color, disable_color,
+            FIRMWARE_VERSION, local_time) % stateis
 
     writer.write('HTTP/1.0 200 OK\r\nContent-type: text/html\r\n\r\n')
     writer.write(response)
@@ -750,6 +752,8 @@ async def main():
     global heater_clientOffPeriod_hrs
     global heater_on_message
     global heater_off_message
+    global heater_enabled_message
+    global heater_disabled_message
     global sensor_status
     global heater_test
     global first_pass
@@ -766,11 +770,12 @@ async def main():
     blink_led(0.1, 5)
 
     # Look for I2C devices
-    bmp = test_I2C()
+    bmp = test_i2c()
     if bmp == False:
         sensor_status = 'Sensor error'
         blink_led(1, 10)
-        sys.exit()
+        print("Exiting application:", sensor_status)
+        sys.exit() # Reset
     else:
         sensor_status = 'Sensor active'
 
@@ -791,6 +796,7 @@ async def main():
         get_sensor_data(bmp)  # Try again
         if sensor_status == 'Sensor error':
             blink_led(1, 15)
+            print("Exiting application:", sensor_status)
             sys.exit()  # Reset
 
     wdt.feed()  # Keep watch dog from triggering
@@ -837,6 +843,7 @@ async def main():
             get_sensor_data(bmp)  # Try again
             if sensor_status == 'Sensor error':
                 blink_led(1, 15)
+                print("Exiting application:", sensor_status)
                 sys.exit()  # Reset
 
         # Check heater temperature window
@@ -888,8 +895,10 @@ async def main():
             # print("Heater started",heater_swon_time)
             if heater_state == 'ON':
                 heater_timer_status = 'HEATER_TIMER_RUNNING'  # Start timer
-                heater_on_message = 'turned on at'
-                heater_off_message = 'turned off at'
+                heater_on_message = 'Heater turned on at'
+                heater_off_message = 'Heater turned off at'
+                heater_enabled_message = "Enabled at"
+                heater_disabled_message = "Previously enabled at"
                 # print("Heater timer running")
 
         if heater_enabled == 'ENABLED' and (heater_state == 'ON' or heater_state == 'OFF') and heater_tempWindow_status == 'TEMP TOO HIGH':
@@ -899,8 +908,10 @@ async def main():
                 heater_swoff_time = 'Time unavailable...'
             else:
                 heater_swoff_time = result
-            heater_on_message = "Off" #'turned on at'
-            heater_off_message = 'Temperature too high...element turned off at!'
+            heater_on_message = "Heater off" #'turned on at'
+            heater_off_message = 'Ambient too high, heater turned off at'
+            heater_enabled_message = "Enabled at"
+            heater_disabled_message = "..."
             heater_timer_status = 'HEATER_TIMER_STOPPED'
             # print("Heater ENABLED, heater OFF, heater state == ON/OFF, heater temp window above max threshold")
 
@@ -913,8 +924,10 @@ async def main():
             else:
                 heater_swoff_time = result
                 heater_disabled_time = result
-            heater_on_message = 'turned on at'
-            heater_off_message = 'heater disabled...turned off at!'
+            heater_on_message = 'Heater turned on at'
+            heater_off_message = 'Heater disabled...turned off at!'
+            heater_enabled_message = "Heater enabled at"
+            heater_disabled_message = "Heater disabled at"
             heater_timer_status = 'HEATER_TIMER_STOPPED'
             # print("Heater DISABLED, heater OFF, heater state = ON")
 
@@ -928,8 +941,11 @@ async def main():
                 heater_swon_time = '...'
                 heater_swoff_time = '...'
             # print("Heater DISABLED, heater state = OFF")
-            heater_on_message = 'turned on at'
-            heater_off_message = 'turned off at'
+            heater_on_message = 'Heater turned on at'
+            heater_off_message = 'Heater turned off at'
+            heater_enabled_message = "Heater enabled at"
+            heater_disabled_message = "Heater disabled at"
+            heater_enabled_time = "..."
             heater_timer_status = 'HEATER_TIMER_STOPPED'
 
         # Task when heater enabled and timer active
