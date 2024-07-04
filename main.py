@@ -448,8 +448,7 @@ def get_sensor_data(bmp):
         pressure = bmp.values[1]
 
         # Get sensor humidity data
-        #humidity = bmp.values[2]
-        humidity = "12.2"
+        humidity = bmp.values[2]
         sensor_status = 'Sensor active'
     except:
         print("Temp sensor error...")
