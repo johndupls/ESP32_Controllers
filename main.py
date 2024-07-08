@@ -438,17 +438,21 @@ def get_sensor_data(bmp):
     global sensor_status
 
     try:
-        # Get sensor temperature data
+        # Get sensor temperature data (value only)
         t = bmp.values[0]
         t = t.split('C')  # Remove 'C'
         t = t[0]  # Get only the number
         amb_temp = t
-
+        
         # Get sensor pressure data
         pressure = bmp.values[1]
 
-        # Get sensor humidity data
-        humidity = bmp.values[2]
+        # Get sensor humidity data (value only)
+        h = bmp.values[2]
+        h = h.split('%')  # Remove '%'
+        h = h[0]  # Get only the number
+        humidity = h
+        
         sensor_status = 'Sensor active'
     except:
         print("Temp sensor error...")
@@ -459,7 +463,7 @@ def dew_point_calc():
     global humidity
     global dew_point
     temp = 0.0
-
+    
     temp = float(amb_temp) - ((100-float(humidity))/5) # Dew point calculation
     temp = round(temp,2) # Round up number
     dew_point = str(temp)
