@@ -2,7 +2,7 @@
     Pond Warmer Controller with Wi-Fi 
     Version: V1.4
     Date:2024-07-04
-    Static IP Address: 192.168.2.32
+    Static IP Address: 192.168.2.49
     
     Updates: Test button, 30 second 'ON' test
                      Timer activated - used for decrementing  all counters
@@ -45,6 +45,7 @@ HEATER_TEST_PERIOD = 30  # Seconds
 CLIENT_REFRESH_PERIOD = 30 # Seconds
 CTRL_LIVE_PERIOD = 15 # 15 Seconds
 STATIC_ADDR = "192.168.2.32"
+UNIT_ID = ""
 
 # Global timer variables
 timer_tick = False
@@ -135,6 +136,13 @@ rtc = RTC()
 ssid = WIFI_NAME
 password = WIFI_PASS
 
+def  get_id():
+    global unit_id
+    
+    id = STATIC_ADDR
+    id = id.split(".")
+    unit_id = id[3]
+    
 #Cold start variable setup
 def setup_variables():
     global heater_onPeriod_secs
@@ -224,7 +232,7 @@ def webpage(amb_temp, pressure, humidity, dew_point,
             heater_enabled_time, heater_disabled_time,
             heater_swon_time, heater_swoff_time,
             enable_color, disable_color,
-            FIRMWARE_VERSION, local_time):
+            FIRMWARE_VERSION, unit_id, local_time):
     # HTML Template
     html = f"""
             <!DOCTYPE html>
@@ -243,7 +251,8 @@ def webpage(amb_temp, pressure, humidity, dew_point,
             <p><center><h2>Pond Water Heater Monitor {FIRMWARE_VERSION}</h2></center></p>
             
             <p><center>Local Date: <em>{local_time[0]}:{local_time[1]}:{local_time[2]}</em> &nbsp Local Time: <em>{local_time[4]}:{local_time[5]}:{local_time[6]}</em></center></p>
-
+            <p><center>Unit ID: <em>{unit_id}</em></center></p>
+            
             <p><center><h3>Sensor Data</center></h3></p>            
             <p><center>Temperature:<em> {amb_temp}DegC</em> &nbsp Pressure:<em> {pressure}</em></center></p>
             <p><center>Humidity:<em> {humidity}&percnt;</em> &nbsp Dew point:<em> {dew_point}DegC</em></center></p>
@@ -702,7 +711,7 @@ async def serve_client(reader, writer):
             heater_enabled_time, heater_disabled_time,
             heater_swon_time, heater_swoff_time,
             enable_color, disable_color,
-            FIRMWARE_VERSION, local_time) % stateis
+            FIRMWARE_VERSION, unit_id, local_time) % stateis
 
     writer.write('HTTP/1.0 200 OK\r\nContent-type: text/html\r\n\r\n')
     writer.write(response)
@@ -805,6 +814,9 @@ async def main():
             print("Exiting application:", sensor_status)
             sys.exit()  # Reset
 
+    # Get unit ID
+    get_id() # Last value in IP addr
+    
     wdt.feed()  # Keep watch dog from triggering
 
     while True:
