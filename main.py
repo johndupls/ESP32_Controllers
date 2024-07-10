@@ -44,7 +44,7 @@ UTC_OFFSET = 4 * 60 * 60  # Seconds, Ottawa offset = 4/5
 HEATER_TEST_PERIOD = 30  # Seconds
 CLIENT_REFRESH_PERIOD = 30 # Seconds
 CTRL_LIVE_PERIOD = 15 # 15 Seconds
-STATIC_ADDR = "192.168.2.32"
+STATIC_ADDR = "192.168.2.49"
 
 # Global timer variables
 timer_tick = False
