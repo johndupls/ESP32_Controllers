@@ -12,6 +12,7 @@
                      Client refresh time constant added. Set to 30secs
                      Add humidity and dew point to client web page
                      Add OTA programming
+                     Set up to use static address
 """
 
 # Imports
@@ -43,6 +44,7 @@ UTC_OFFSET = 4 * 60 * 60  # Seconds, Ottawa offset = 4/5
 HEATER_TEST_PERIOD = 30  # Seconds
 CLIENT_REFRESH_PERIOD = 30 # Seconds
 CTRL_LIVE_PERIOD = 15 # 15 Seconds
+STATIC_ADDR = "192.168.2.32"
 
 # Global timer variables
 timer_tick = False
@@ -364,7 +366,7 @@ def webpage(amb_temp, pressure, humidity, dew_point,
 # Search for any devices on bus
 def find_i2c_devices():
     # Scan
-    print("Scanning for I2C devices")
+    print("\n" + "Scanning for I2C devices")
     devices = i2c1.scan()
     if len(devices) >= 1:
         print("...{} x I2C devices found".format(len(devices)))
@@ -524,6 +526,7 @@ async def connect_to_wifi():
     global local_time
 
     wlan.active(True)  # Activate interface
+    wlan.ifconfig( (STATIC_ADDR, '255.255.255.0', '192.168.2.1', '192.168.2.1')) # Set static address, subnet, gateway & dns
     wlan.connect(ssid, password)
 
     # Wait for connect or fail
@@ -556,7 +559,7 @@ async def connect_to_wifi():
         print('...WiFi Connected at {}:{}:{}'.format(local_time[4], local_time[5], local_time[6]))
         status = wlan.ifconfig()
         ip_addr = status[0]
-        print('...IP Addr = {}\n'.format(ip_addr))
+        print("...WLAN parameters: ",wlan.ifconfig())
         wlan_connected = True
     wdt.feed()  # Keep watch dog from triggering
 
