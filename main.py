@@ -1,7 +1,7 @@
 """
     Pond Warmer Controller with Wi-Fi 
     Version: V1.4
-    Date:2024-07-04
+    Date:2024-07-10
     Static IP Address: 192.168.2.49
     
     Updates: Test button, 30 second 'ON' test
@@ -45,13 +45,15 @@ HEATER_TEST_PERIOD = 30  # Seconds
 CLIENT_REFRESH_PERIOD = 30 # Seconds
 CTRL_LIVE_PERIOD = 15 # 15 Seconds
 STATIC_ADDR = "192.168.2.32"
-UNIT_ID = ""
 
 # Global timer variables
 timer_tick = False
 first_pass = False
 local_time = ''
 ctrl_live_counter = 30 #Seconds
+
+#Global controller variables
+unit_id = ""
 
 # Global sensor data variables
 amb_temp = ""
@@ -600,6 +602,7 @@ async def serve_client(reader, writer):
     global sensor_status
     global enable_color
     global disable_color
+    global unit_id
 
     # print("Client connected")
     blink_led(0.1, 1)
