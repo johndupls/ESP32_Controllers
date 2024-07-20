@@ -1,7 +1,7 @@
 """
     Pond Warmer Controller with Wi-Fi 
     Version: V1.4
-    Date:2024-07-10
+    Date:2024-07-20
     Static IP Address: 192.168.2.49
     
     Updates: Test button, 30 second 'ON' test
@@ -13,6 +13,7 @@
                      Add humidity and dew point to client web page
                      Add OTA programming
                      Set up to use static address
+                     Added garbage collection to avoid memory overruns
 """
 
 # Imports
@@ -25,11 +26,13 @@ from machine import Pin, I2C, WDT, Timer, RTC
 import bme280
 import sys
 from credentials import WIFI_NAME, WIFI_PASS
+import gc
+import errno
 
 # Const declarations
 FIRMWARE_VERSION = '1.4'
 INTERVAL_SEC = 0.25
-LOOP_REFRESH_SEC = 1.0
+LOOP_REFRESH_SEC = 2.0
 ON = 1
 OFF = 0
 HIGH = 1
@@ -38,28 +41,32 @@ ENABLED = 1
 DISABLED = 0
 HEATER_TIMER_RUNNING = 1
 HEATER_TIMER_STOPPED = 0
-HEATER_ON_TEMP = 1.2  # Actual1.2, debug 25.0 Deg C
-HEATER_OFF_TEMP = 5.0  # Actual5.0, debug 30.0 Deg C
+HEATER_ON_TEMP = 0.5  # Actual 0.5, debug 25.0 Deg C
+HEATER_OFF_TEMP = 3.0  # Actual 3.0, debug 30.0 Deg C
 UTC_OFFSET = 4 * 60 * 60  # Seconds, Ottawa offset = 4/5
-HEATER_TEST_PERIOD = 30  # Seconds
+HEATER_TEST_PERIOD = 60  # Seconds
 CLIENT_REFRESH_PERIOD = 30 # Seconds
 CTRL_LIVE_PERIOD = 15 # 15 Seconds
-STATIC_ADDR = "192.168.2.49"
+GC_TIMEOUT = 1800 # 30mins x 60
+STATIC_ADDR = '192.168.2.49'
 
 # Global timer variables
 timer_tick = False
 first_pass = False
 local_time = ''
-ctrl_live_counter = 30 #Seconds
+ctrl_live_counter = 30 # Seconds
+
+# Garbage collection timeout
+gc_timeout_counter = GC_TIMEOUT
 
 #Global controller variables
-unit_id = ""
+unit_id = ''
 
 # Global sensor data variables
-amb_temp = ""
-pressure = ""
-humidity = ""
-dew_point = ""
+amb_temp = ''
+pressure = ''
+humidity = ''
+dew_point = ''
 sensor_status = 'Unknown'
 
 # Global startup variable
@@ -100,9 +107,11 @@ heater_tempWindow_status = ''  # Shows the state of the temperature window for h
 # Global WLAN variables
 ip_addr = ''
 wlan_connect_time = ''  # Time and date connected to network
+wlan_disconnect_time = '' # Time and date disconnected from network
 server_connect_state = False  # False indicates server disconnected
 notConnectedCounter = 0 # Number of re-connect attempts
 wlan_reconnect = False
+rssi = '' # WiFi recieved signal strength
 
 # I2C device addresses
 bmp_addr1 = 0x76  # BMP280 address 1
@@ -110,11 +119,11 @@ bmp_addr2 = 0x77  # BMP280 alternative address 2
 num_i2c_devices = 0  # Number of I2C devices detected
 
 # Create LED object
-status_led = Pin(33, Pin.OUT, value=1)  # LED off
+status_led = Pin(33, Pin.OUT, value=1)  # By default LED off
 status_led_state = ''  # LED state "ON" or "OFF"
 
 # Create heater object
-heater = Pin(5, Pin.OUT, value=0)  # GPIO5 actual controller
+heater = Pin(5, Pin.OUT, value=0)  # GPIO5 actual controller, by default heater off
 
 # Create WLAN object
 wlan_connected = False
@@ -138,12 +147,15 @@ rtc = RTC()
 ssid = WIFI_NAME
 password = WIFI_PASS
 
+# Enable garbage collection
+gc.enable()
+
 def  get_id():
     global unit_id
     
     id = STATIC_ADDR
     id = id.split(".")
-    unit_id = id[3]
+    unit_id = id[3] # The last value in the address is used as the ID
     
 #Cold start variable setup
 def setup_variables():
@@ -169,6 +181,8 @@ def setup_variables():
     global heater_enabled
     global heater_test
     global heater_tempWindow_status
+    global heater_enabled_message
+    global heater_disabled_message
 
     global ip_addr
     global wlan_connect_time
@@ -215,16 +229,34 @@ def tim0_callback(tim0):
     global ctrl_live_counter
     global  heater_onPeriodCntr_secs
     global  heater_offPeriodCntr_secs
+    global gc_timeout_counter
 
-    if ctrl_live_counter != 0: # Decrement while counters not zero
+    # Decrement while counters not zero
+    if ctrl_live_counter != 0: # Keep alive counter
         ctrl_live_counter -= 1
         
-    if heater_onPeriodCntr_secs != 0:
+    if heater_onPeriodCntr_secs > 0:
         heater_onPeriodCntr_secs -= 1
         
-    if heater_offPeriodCntr_secs != 0:
+    if heater_offPeriodCntr_secs > 0:
         heater_offPeriodCntr_secs -= 1
 
+    if gc_timeout_counter > 0: # Garbage collection after 30 seconds
+        gc_timeout_counter -= 1
+
+# Get recieved signal strength
+def get_rssi():
+    global rssi
+    
+    result = wlan.status('rssi')
+    if result <=-50 and result >= -64:
+        print('RSSI...strong signal: {}dBm'.format(result))
+    elif result <= -65 and result >= -79:
+        print('RSSI...moderate signal: {}dBm'.format(result))
+    elif result <= -80:
+        print('RSSI...exceeding minimum acceptable signal for connection: {}dBm'.format(result))
+    print('\n')
+    rssi = str(result)
 
 # Create server webpage
 def webpage(amb_temp, pressure, humidity, dew_point,
@@ -234,7 +266,7 @@ def webpage(amb_temp, pressure, humidity, dew_point,
             heater_enabled_time, heater_disabled_time,
             heater_swon_time, heater_swoff_time,
             enable_color, disable_color,
-            FIRMWARE_VERSION, unit_id, local_time):
+            FIRMWARE_VERSION, unit_id, rssi, local_time):
     # HTML Template
     html = f"""
             <!DOCTYPE html>
@@ -253,7 +285,7 @@ def webpage(amb_temp, pressure, humidity, dew_point,
             <p><center><h2>Pond Water Heater Monitor {FIRMWARE_VERSION}</h2></center></p>
             
             <p><center>Local Date: <em>{local_time[0]}:{local_time[1]}:{local_time[2]}</em> &nbsp Local Time: <em>{local_time[4]}:{local_time[5]}:{local_time[6]}</em></center></p>
-            <p><center>Unit ID: <em>{unit_id}</em></center></p>
+            <p><center>Unit ID: <em>{unit_id}</em> &nbsp Signal Strength: <em>{rssi}dBm</em></center></p>
             
             <p><center><h3>Sensor Data</center></h3></p>            
             <p><center>Temperature:<em> {amb_temp}DegC</em> &nbsp Pressure:<em> {pressure}</em></center></p>
@@ -377,12 +409,12 @@ def webpage(amb_temp, pressure, humidity, dew_point,
 # Search for any devices on bus
 def find_i2c_devices():
     # Scan
-    print("\n" + "Scanning for I2C devices")
+    print('\n' + 'Scanning for I2C devices')
     devices = i2c1.scan()
     if len(devices) >= 1:
-        print("...{} x I2C devices found".format(len(devices)))
+        print('...{} x I2C devices found'.format(len(devices)))
     else:
-        print("...{} x I2C device found".format(len(devices)))
+        print('...{} x I2C device found'.format(len(devices)))
     # Return number of devices
     return devices #List of devices
 
@@ -405,10 +437,10 @@ def check_i2c_addr(i2c_devices):
     else:
         for d in i2c_devices:  # Iterate through device/s
             if d == bmp_addr1:
-                print("...BME280 device found @ address={}\n".format(hex(d)))
+                print('...BME280 device found @ address={}\n'.format(hex(d)))
                 return 1
             elif d == bmp_addr2:
-                print("...BME280 device found @ address={}\n".format(hex(d)))
+                print('...BME280 device found @ address={}\n'.format(hex(d)))
                 return 1
             else:
                 return 2  # Unknown address found
@@ -424,9 +456,9 @@ def test_i2c():
         bmp = create_i2c_obj(i2c_devices)
         return bmp
     elif result == 0:
-        print("No I2C devices found")
+        print('No I2C devices found')
     elif result == 2:
-        print("Device address not recognised")
+        print('Device address not recognised')
     return False
 
 
@@ -436,10 +468,10 @@ def blink_led(frequency=0.5, num_blinks=3):
 
     for _ in range(num_blinks):
         status_led.off()  # Inverted, LED on
-        status_led_state = "ON"
+        status_led_state = 'ON'
         time.sleep(frequency)
         status_led.on()  # Inverted, LED off
-        status_led_state = "OFF"
+        status_led_state = 'OFF'
         time.sleep(frequency)
 
 
@@ -468,7 +500,7 @@ def get_sensor_data(bmp):
         
         sensor_status = 'Sensor active'
     except:
-        print("Temp sensor error...")
+        print('Temp sensor error...')
         sensor_status = 'Sensor error'
 
 def dew_point_calc():
@@ -523,9 +555,9 @@ def setup_RTC():
 
         # RTC value is now set to local time zone
         # print("RTC local time {} \n ".format(rtc.datetime()))
-        return "RTC_good"
+        return 'RTC_good'
     except:
-        print("RTC error")
+        print('RTC error')
         return False
 
 # Connect to Wi-Fi network
@@ -535,6 +567,8 @@ async def connect_to_wifi():
     global wlan_connect_time
     global ip_addr
     global local_time
+
+    wdt.feed()  # Keep watch dog from triggering
 
     wlan.active(True)  # Activate interface
     wlan.ifconfig( (STATIC_ADDR, '255.255.255.0', '192.168.2.1', '192.168.2.1')) # Set static address, subnet, gateway & dns
@@ -563,17 +597,20 @@ async def connect_to_wifi():
             #print("Retrieving  sync'ed data from RTC")
             local_time = rtc.datetime()
         else:
-            print("Using local time")
-            local_time = time.localtime() 
-
-        print("...Date: {}:{}:{}".format(local_time[0], local_time[1], local_time[2]))
+            print('Using local time')
+            local_time = time.localtime()
+            
+        print('...Date: {}:{}:{}'.format(local_time[0], local_time[1], local_time[2]))
         print('...WiFi Connected at {}:{}:{}'.format(local_time[4], local_time[5], local_time[6]))
+        
+        #Record time connected
+        wlan_connect_time = str(local_time[0]) + ':' + str(local_time[1])  + ':' +  str(local_time[2])  + '...' +  str(local_time[4])  + ':' +  str(local_time[5]) + ':' +  str(local_time[6])
+        
         status = wlan.ifconfig()
         ip_addr = status[0]
-        print("...WLAN parameters: ",wlan.ifconfig())
+        print('...WLAN parameters: {}\n'.format(wlan.ifconfig()) )
         wlan_connected = True
-    wdt.feed()  # Keep watch dog from triggering
-
+        
 
 # Client handler
 async def serve_client(reader, writer):
@@ -604,19 +641,32 @@ async def serve_client(reader, writer):
     global disable_color
     global unit_id
 
+    wdt.feed()  # Keep watch dog from triggering
+    
     # print("Client connected")
     blink_led(0.1, 1)
 
-    request_line = await reader.readline()  # Read a line
-    # print("Request:", request_line)
-
-    # We are not interested in HTTP request headers, skip them
-    while await reader.readline() != b"\r\n":
-        pass
+    req_timeout = 20
+    try:        
+        request_line = await reader.readline()  # Read a line
+     
+        # We are not interested in HTTP request headers, skip them
+        while await reader.readline() != b"\r\n":
+            if req_timeout != 0:
+                req_timeout -= 1
+                continue
+            else:
+                break
+    except OSError as exc:
+        if exc.errno == errno.ECONNRESET:
+            print('Connection reset by peer')
+        elif exc.errno == errno.ECONNABORTED:
+            print('Software caused connection abort')
+        return         
 
     # find valid heater commands within the request
     request = str(request_line)
-    print("Request:\n", request_line)
+    print('Request recieved:\n', request_line)
 
     cmd_disabled = request.find('HEATER=DISABLED')
     cmd_enabled = request.find('HEATER=ENABLED')
@@ -632,23 +682,23 @@ async def serve_client(reader, writer):
     # print('OFF+PERIOD => ' + str(cmd_offPeriod))
     # print('HEATER=TEST => ' + str(cmd_test))
 
-    stateis = ""  # Keeps track of the last command issued
+    stateis = ''  # Keeps track of the last command issued
 
     # Carry out a command if it is found (found at index: 8)
     if cmd_disabled == 8:
-        stateis = "Heater disabled"
+        stateis = 'Heater disabled'
         # print(stateis)
         heater_enabled = 'DISABLED'  # Clear flag
-        heater_disabled_time = "{}:{}:{}".format(local_time[4], local_time[5], local_time[6])  # Get RTC time
+        heater_disabled_time = '{}:{}:{}'.format(local_time[4], local_time[5], local_time[6])  # Get RTC time
         enable_color = 'grey'
         disable_color = 'red'
         blink_led(0.1, 2)
 
     if cmd_enabled == 8:
-        stateis = "Heater enabled"
+        stateis = 'Heater enabled'
         # print(stateis)
         heater_enabled = 'ENABLED'  # Set flag
-        heater_enabled_time = "{}:{}:{}".format(local_time[4], local_time[5], local_time[6])  # Get RTC time
+        heater_enabled_time = '{}:{}:{}'.format(local_time[4], local_time[5], local_time[6])  # Get RTC time
         enable_color = 'green'
         disable_color = 'grey'
         blink_led(0.1, 2)
@@ -664,12 +714,12 @@ async def serve_client(reader, writer):
                 60 * 60 * float(heater_clientOnPeriod_hrs))  # Convert hrs to seconds & update main register
             # print("Heater on period in seconds: ", heater_onPeriod_secs)
             heater_onPeriodCntr_secs = heater_onPeriod_secs  # Update on period timer counter
-            stateis = "On period changed to {}hrs".format(heater_clientOnPeriod_hrs)
+            stateis = 'On period changed to {}hrs'.format(heater_clientOnPeriod_hrs)
         except:
             print('Data input error')
 
     elif cmd_onPeriod == 8 and heater_enabled == 'ENABLED':
-        stateis = "Can't modify heater 'ON TIME' when heater enabled"
+        stateis = 'Not allowed to modify heater "ON TIME" when heater enabled'
 
     if cmd_offPeriod == 8 and heater_enabled == 'DISABLED':
         t = request.split()  # Extract time value
@@ -682,31 +732,40 @@ async def serve_client(reader, writer):
                 60 * 60 * float(heater_clientOffPeriod_hrs))  # Convert hrs to seconds & update main register
             # print("Heater off period: ",heater_offPeriod_secs)
             heater_offPeriodCntr_secs = heater_offPeriod_secs  # Update off period timer counter
-            stateis = "Off period changed to {}hrs".format(float(heater_clientOffPeriod_hrs))
+            stateis = 'Off period changed to {}hrs'.format(float(heater_clientOffPeriod_hrs))
         except:
             print('Data input error')
-            stateis = "Can't modify heater OFF TIME when enabled"
+            stateis = 'Not allowed to modify heater "OFF TIME" when enabled'
 
     elif cmd_offPeriod == 8 and heater_enabled == 'ENABLED':
-        stateis = "Can't modify heater 'OFF TIME' when heater enabled"
+        stateis = 'Not allowed to modify heater "OFF TIME" when heater enabled'
 
     if cmd_refresh == 8:
-        stateis = "Page refresh"
+        stateis = 'Page refresh'
         # print(stateis)
         blink_led(0.1, 2)
 
     if cmd_test == 8:
     # Enter if heater disabled
         if heater_enabled == 'DISABLED':
-            stateis = "Heater Test Duration: {} seconds".format(HEATER_TEST_PERIOD)
+            stateis = 'Heater Test Duration: {} seconds'.format(HEATER_TEST_PERIOD)
             heater_test = 'ENABLED'
             blink_led(0.1, 2)
         else:
-            stateis = "TEST.....Disable heater before test"
+            stateis = 'TEST.....Disable heater before test'
 
     wdt.feed()  # Keep watch dog from triggering every second
 
-    response = webpage(
+    # Free memory
+    gc.collect() #Run garbage collection
+    free_mem = gc.mem_free()
+    print('Memory freed for response: ', free_mem)
+    if free_mem < 10000:
+        print('Not enough memeory for response message')
+        return
+
+    try:
+        response = webpage(
             amb_temp, pressure, humidity, dew_point,
             heater_state, heater_enabled,
             heater_on_message, heater_off_message, heater_enabled_message, heater_disabled_message,
@@ -714,14 +773,17 @@ async def serve_client(reader, writer):
             heater_enabled_time, heater_disabled_time,
             heater_swon_time, heater_swoff_time,
             enable_color, disable_color,
-            FIRMWARE_VERSION, unit_id, local_time) % stateis
-
-    writer.write('HTTP/1.0 200 OK\r\nContent-type: text/html\r\n\r\n')
-    writer.write(response)
-
-    await writer.drain()
-    await writer.wait_closed()
-    print("Client disconnected")
+            FIRMWARE_VERSION, unit_id, rssi, local_time) % stateis
+        writer.write('HTTP/1.0 200 OK\r\nContent-type: text/html\r\n\r\n')
+        writer.write(response)
+        await writer.drain()
+        await writer.wait_closed()
+        print("Client disconnected")
+    except OSError as exc:
+        # Free memory
+        if exc.errno == errno.ENOMEM:
+            gc.collect()
+            print("Free memory: ", gc.mem_free())    
 
 # Turn heater element off
 def heater_off():
@@ -746,6 +808,27 @@ def heater_on():
     heater_onPeriodCntr_secs = heater_onPeriod_secs  # Cntr preset with latest value
     heater.on()
 
+def wlan_test():
+     # Handle connection status
+    if  wlan.status() != 1010:
+        print('WiFi connection error') 
+    elif wlan.status() == 1000:
+        print('Link down, no connection and no activity') 
+    elif wlan.status() == 1001:
+            print('Link join, connecting in progress')
+    elif wlan.status() == 200:
+            print('Link noip')
+    elif wlan.status() == 203:
+            print('Link fail, failed due to other problems')
+    elif wlan.status() == 201:
+            print('Link nonet, failed because no access point replied')
+    elif wlan.status() == 202:
+            print('Link badauth, failed due to incorrect password')
+    elif wlan.status() == 204:
+            print('Link handshake timeout')
+    else:
+        print("WLAN connected, status = ", 1010)
+    return wlan.status()
 
 # Main loop
 async def main():
@@ -780,6 +863,9 @@ async def main():
     global status_led_state
     global wlan_reconnect
     global notConnectedCounter
+    global wlan_disconnect_time
+    global wlan_connect_time
+    global gc_timeout_counter
 
     # Start timer 0
     tim0.init(period=1000, mode=Timer.PERIODIC, callback=tim0_callback)
@@ -792,7 +878,7 @@ async def main():
     if bmp == False:
         sensor_status = 'Sensor error'
         blink_led(1, 10)
-        print("Exiting application:", sensor_status)
+        print('Exiting application:', sensor_status)
         sys.exit() # Reset
     else:
         sensor_status = 'Sensor active'
@@ -814,10 +900,10 @@ async def main():
         get_sensor_data(bmp)  # Try again
         if sensor_status == 'Sensor error':
             blink_led(1, 15)
-            print("Exiting application:", sensor_status)
+            print('Exiting application:', sensor_status)
             sys.exit()  # Reset
 
-    # Get unit ID
+    # Update unit ID
     get_id() # Last value in IP addr
     
     wdt.feed()  # Keep watch dog from triggering
@@ -834,38 +920,44 @@ async def main():
             if wlan_reconnect == True:
                 notConnectedCounter += 1
             asyncio.create_task(connect_to_wifi())
-            
+               
         if wlan_connected and (server_connect_state == False):
             '''
                 Start a TCP server on the given host and port. The callback will be called with incoming, accepted connections,
                 and be passed 2 arguments: reader and writer streams for the connection. Returns a Server object.
             '''
             print('Creating webserver')
-            asyncio.create_task(asyncio.start_server(serve_client, "0.0.0.0", 80))
+            asyncio.create_task(asyncio.start_server(serve_client, '0.0.0.0', 80))
             print('...Web server ready...\n')
             server_connect_state = True
-
-        await asyncio.sleep(LOOP_REFRESH_SEC)  # 1sec
-
+        
+        await asyncio.sleep(LOOP_REFRESH_SEC)  # 2 sec 
+        
         # Update RTC  global storage variable
         local_time = rtc.datetime()
+
+        # Check garbage collection timeout
+        if gc_timeout_counter == 0: # Times out after 30 seconds
+            gc.collect() #Free up memory
+            gc_timeout_counter = GC_TIMEOUT #Preset counter
         
         #Check controller alive counter
-        if ctrl_live_counter == 0 :
+        if ctrl_live_counter == 0:
             blink_led(frequency=0.05, num_blinks=1) #Flash LED
             ctrl_live_counter = CTRL_LIVE_PERIOD #Preset counter
 
         # Refresh data
         if sensor_status == 'Sensor active':
             get_sensor_data(bmp)
-            dew_point_calc()
+            dew_point_calc() # Calculate dew point
         elif sensor_status == 'Sensor error':
             time.sleep(2)  # 2sec
-            get_sensor_data(bmp)  # Try again
+            get_sensor_data(bmp)  # Try again to confirm
             if sensor_status == 'Sensor error':
                 blink_led(1, 15)
-                print("Exiting application:", sensor_status)
-                sys.exit()  # Reset
+                print('Resetting ESP32...', sensor_status)
+                await asyncio.sleep(2)
+                machine.reset() # Reset ESP
 
         # Check heater temperature window
         check_temp_window()
@@ -883,6 +975,9 @@ async def main():
                 else:
                     heater_swon_time = result
                     heater_swoff_time = '...'
+                heater_enabled_time = '...'
+                heater_on_message = 'Heater test turned on at'
+                heater_off_message = 'Heater test turned off at'
                 first_pass = True
             elif heater_test == 'ENABLED' and first_pass == True and heater_onPeriodCntr_secs != 0:
                 #print("heater_onPeriodCntr_secs:", heater_onPeriodCntr_secs)
@@ -890,12 +985,14 @@ async def main():
             else: 
                 #print("Heater test complete, turning off heater")
                 heater_off()  # Heater turned off
-                result = "{}:{}:{}".format(local_time[4], local_time[5], local_time[6])  # Get RTC time
+                result = '{}:{}:{}'.format(local_time[4], local_time[5], local_time[6])  # Get RTC time
                 if result == '':
                     heater_swoff_time = 'Time unavailable...'
                 else:
                     heater_swoff_time = result
                 heater_test = 'DISABLED'
+                heater_on_message = 'Heater test turned on at'
+                heater_off_message = 'Heater test turned off at'
                 first_pass = False
             wdt.feed()  # Keep watch dog from triggering every second
 
@@ -903,42 +1000,42 @@ async def main():
         if heater_enabled == 'ENABLED' and heater_state == 'OFF' and heater_timer_status == 'HEATER_TIMER_STOPPED' and heater_tempWindow_status == 'TEMP GOOD':
             # print("Turning on heater...heater ENABLED, heater OFF, heater timer STOPPED, heater temp below min threshold")
             heater_on()  # Turn on heater
-            result = "{}:{}:{}".format(local_time[4], local_time[5], local_time[6])  # Get RTC time
+            result = '{}:{}:{}'.format(local_time[4], local_time[5], local_time[6])  # Get RTC time
             if result == '':
                 heater_swon_time = 'Time unavailable...'
                 #heater_enabled_time = 'Time unavailable...'
             else:
                 heater_swon_time = result
-                heater_enabled_time = result
-            #heater_disabled_time = '...'
-            heater_swoff_time = '...'
 
             # print("Heater started",heater_swon_time)
             if heater_state == 'ON':
                 heater_timer_status = 'HEATER_TIMER_RUNNING'  # Start timer
+                heater_enabled_message = 'Heater enabled at'
+                heater_enabled_time = result
                 heater_on_message = 'Heater turned on at'
                 heater_off_message = 'Heater turned off at'
-                heater_enabled_message = "Enabled at"
-                heater_disabled_message = "Previously enabled at"
+                heater_swon_time = result
+                heater_swoff_time = '...'
+                heater_disabled_message = 'Heater disabled at'
                 # print("Heater timer running")
 
         if heater_enabled == 'ENABLED' and (heater_state == 'ON' or heater_state == 'OFF') and heater_tempWindow_status == 'TEMP TOO HIGH':
             heater_off()  # Turn off heater
-            result = "{}:{}:{}".format(local_time[4], local_time[5], local_time[6])  # Get RTC time
+            result = '{}:{}:{}'.format(local_time[4], local_time[5], local_time[6])  # Get RTC time
             if result == '':
                 heater_swoff_time = 'Time unavailable...'
             else:
                 heater_swoff_time = result
-            heater_on_message = "Heater off" #'turned on at'
+            heater_on_message = 'Heater turned on at' #'turned on at'
             heater_off_message = 'Ambient too high, heater turned off at'
-            heater_enabled_message = "Enabled at"
-            heater_disabled_message = "..."
+            heater_enabled_message = 'Heater enabled at'
+            heater_disabled_message = 'Heater disabled at'
             heater_timer_status = 'HEATER_TIMER_STOPPED'
             # print("Heater ENABLED, heater OFF, heater state == ON/OFF, heater temp window above max threshold")
 
         if heater_enabled == 'DISABLED' and  heater_state == 'ON'  and  heater_test == 'DISABLED':
             heater_off()
-            result = "{}:{}:{}".format(local_time[4], local_time[5], local_time[6])  # Get RTC time
+            result = '{}:{}:{}'.format(local_time[4], local_time[5], local_time[6])  # Get RTC time
             if result == '':
                 heater_swoff_time = 'Time unavailable...'
                 heater_disabled_time = 'Time unavailable...'
@@ -947,14 +1044,14 @@ async def main():
                 heater_disabled_time = result
             heater_on_message = 'Heater turned on at'
             heater_off_message = 'Heater disabled...turned off at!'
-            heater_enabled_message = "Heater enabled at"
-            heater_disabled_message = "Heater disabled at"
+            heater_enabled_message = 'Heater enabled at'
+            heater_disabled_message = 'Heater disabled at'
             heater_timer_status = 'HEATER_TIMER_STOPPED'
             # print("Heater DISABLED, heater OFF, heater state = ON")
 
         if heater_enabled == 'DISABLED' and heater_state == 'OFF' and  heater_test == 'DISABLED' :
             if heater_timer_status == 'HEATER_TIMER_RUNNING':
-                result = "{}:{}:{}".format(local_time[4], local_time[5], local_time[6])  # Get RTC time
+                result = '{}:{}:{}'.format(local_time[4], local_time[5], local_time[6])  # Get RTC time
                 if result == '':
                     heater_disabled_time = 'Time unavailable...'
                 else:
@@ -964,9 +1061,10 @@ async def main():
             # print("Heater DISABLED, heater state = OFF")
             heater_on_message = 'Heater turned on at'
             heater_off_message = 'Heater turned off at'
-            heater_enabled_message = "Heater enabled at"
-            heater_disabled_message = "Heater disabled at"
-            heater_enabled_time = "..."
+            heater_swon_time = '...'
+            heater_enabled_message = 'Heater enabled at'
+            heater_disabled_message = 'Heater disabled at'
+            heater_enabled_time = '...'
             heater_timer_status = 'HEATER_TIMER_STOPPED'
 
         # Task when heater enabled and timer active
@@ -995,7 +1093,7 @@ async def main():
             elif heater_offPeriodCntr_secs == 0:
                 heater.on()  # Heater turned on
                 heater_state = 'ON'
-                result = "{}:{}:{}".format(local_time[4], local_time[5], local_time[6])  # Get RTC time
+                result = '{}:{}:{}'.format(local_time[4], local_time[5], local_time[6])  # Get RTC time
                 if result == '':
                     heater_swon_time = 'Time unavailable...'
                 else:
@@ -1004,18 +1102,28 @@ async def main():
                 heater_onPeriodCntr_secs = heater_onPeriod_secs  # Cntr preset
                 # heater_disabled_time = ''
 
-        if wlan.isconnected() == False: # Check if wlan connected
-            await asyncio.sleep(5)  # 5sec
-            if wlan.isconnected() == False:  # Confirm disconnected
-                print('Network disconnected...')
-                # Config for retry
-                wlan_connected = False  # Re-connect flag cleared
-                server_connect_state = False  # Server flag cleared
-                wlan_reconnect = True # Indicate re connection is required
-                if notConnectedCounter > 10: # Check re-connect timeout counter
-                    print("Resetting ESP32...")
-                    time.sleep(2)
-                    machine.reset() # Reset ESP
+        #Print wlan flags
+        print('wlan_connected:', wlan_connected)
+        print('server_connect_state', server_connect_state)
+        print('Config:', wlan.ifconfig())
+        
+        #Get RSSI
+        get_rssi()
+        
+        # Check wlan connection state
+        wifi_state  = wlan_test()
+        if wifi_state != 1010:
+            wlan_disconnect_time = str(local_time[0]) + ':' + str(local_time[1])  + ':' +  str(local_time[2])  + '...' +  str(local_time[4])  + ':' +  str(local_time[5]) + ':' +  str(local_time[6])
+            print('Network connected at ', wlan_connect_time)
+            print('Network disconnected at ', wlan_disconnect_time)
+            # Config for restart
+            wlan_connected = False  # Re-connect flag cleared
+            server_connect_state = False  # Server flag cleared
+            wlan_reconnect = True # Indicate re connection is required
+            if notConnectedCounter > 10: # Check re-connect timeout counter
+                print('Resetting ESP32...')
+                await asyncio.sleep(2)
+                machine.reset() # Reset ESP
                 
         wdt.feed()  # Keep watch dog from triggering every second
     # loop...
