@@ -1,11 +1,14 @@
 """
     BME Temperature Sensor with Wi-Fi and SSD1306 I2C display
-    Version: V1.0
+    Version: V1.1
     Date:2024-07-18
     Static IP Address: 192.168.2.xx 
 
-    Updates: 
+    Updates:
+        V1.0
         Add garbage collection
+        V1.1
+        Change Web Page title
 """
 
 # Imports
@@ -24,7 +27,7 @@ import gc
 import errno
 
 # Const declarations
-FIRMWARE_VERSION = '1.0'
+FIRMWARE_VERSION = '1.1'
 INTERVAL_SEC = 0.25
 LOOP_REFRESH_SEC = 2.0
 ON = 1
@@ -171,13 +174,13 @@ def webpage(
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1">
                 <link rel="icon" href="data:,">
-                <title>Temperature Sensor(15)</title>
+                <title>Internal Temp Sensor '1'</title>
                 <meta http-equiv="refresh" content={CLIENT_REFRESH_PERIOD}>
                 <!--meta http-equiv="refresh" content="15; URL=192.168.2.xx"/-->
             </head>
                
             <body>
-            <p><center><h2>BME280 Temperature Sensor {FIRMWARE_VERSION}</h2></center></p>
+            <p><center><h2>Internal Temperature Sensor {FIRMWARE_VERSION}</h2></center></p>
             
             <p><center>Local Date: <em>{local_time[0]}:{local_time[1]}:{local_time[2]}</em> &nbsp Local Time: <em>{local_time[4]}:{local_time[5]}:{local_time[6]}</em></center></p>
             <p><center>Unit ID: <em>{unit_id}</em> &nbsp Signal Strength: <em>{rssi}dBm</em></center></p>
