@@ -22,7 +22,7 @@ import gc
 import errno
 
 # Const declarations
-FIRMWARE_VERSION = '1.0'
+FIRMWARE_VERSION = '1.1'
 INTERVAL_SEC = 0.25
 LOOP_REFRESH_SEC = 2.0
 ON = 1
