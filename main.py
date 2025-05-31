@@ -1,7 +1,7 @@
 """
     Pond Warmer Controller with Wi-Fi 
     Version: V1.51
-    Date: 2025-05-30
+    Date: 2025-05-31
     Static IP Address: 192.168.2.49
     
     Updates V1.4:
@@ -15,13 +15,13 @@
                     Add OTA programming
                     Set up to use static address
                     Added garbage collection to avoid memory overruns
-    Updates V1.5:
+    Updates V1.51:
                     Add buttons to turn on/off spot light
                     Add auto and manual mode for the light control
                     Timer control over how long light stays on in auto mode, manual mode light stays on continiously
                     Check LDR to check if dark enough to turn on light in both modes
-                    Heater turns on when temperature drops to the minimum temp and stays on continiously.
-                    No longer controlled from the web page.
+                    Heater turns on when temperature drops below the minimum and stays on continiously, no longer
+                    controlled from the web page.
 """
 
 # Imports
@@ -87,16 +87,23 @@ coldstart = False
 # Global heater variables
 heater_button_color = 'red'
 heater_action = 'On'
-heater_onPeriodCntr_secs = 0  # Down counter, preset with 'heater_onPeriod_secs' value during heater on (seconds)
 heater_swon_time = '...'  # Time and date when the heater is turned on
-heater_swoff_time = '...'  # Time and date when the heater is turned off
+heater_run_time = '...'  # Time and date when the heater is turned off
 heater_tempWindow_status = ''  # Shows the state of the temperature window for heater turn on "TEMP GOOD" or off "TEMP TOO HIGH"
+heater_sec_count = 0
+heater_min_count = 0
+heater_hour_count = 0
+heater_day_count = 0
+heater_time_unit = '' # Web page heater on time unit
+
+# Global test variables
+peripheral_onPeriodCntr_secs = 0  # Down counter, preset with 'PERIPHERAL_TEST_PERIOD' value during test on (seconds)
 peripheral_test = 'DISABLED'  # Heater will turn on for set time irrespective of heater_enable or temperature
 
 # Global LED light variables
 led_light_button_color = 'red'
 led_light_button_action = 'On'      
-led_light_onPeriodCntr_secs = LED_LIGHT_ON_PERIOD  # Down counter, preset with 'light_onPeriod_secs' value during light on (seconds)
+led_light_onPeriodCntr_secs = 0  # Down counter, preset with 'light_onPeriod_secs' value during light on (seconds)
 led_light_flag = HIGH
 auto_button_action = 'On'
 auto_button_color = 'red'
@@ -160,13 +167,18 @@ gc.enable()
     
 # Cold start variable setup...
 def setup_variables():
-    global heater_onPeriodCntr_secs
+    global peripheral_onPeriodCntr_secs
     global heater_swon_time
-    global heater_swoff_time
+    global heater_run_time
     global heater_state
     global heater_tempWindow_status
     global heater_button_color
     global heater_action
+    global heater_sec_count
+    global heater_min_count
+    global heater_hour_count
+    global heater_day_count
+    global heater_time_unit
     
     global peripheral_test 
     global ldr_sensor_state
@@ -186,16 +198,17 @@ def setup_variables():
     global auto_mode 
     global manual_mode 
 
-    heater_onPeriodCntr_secs = PERIPHERAL_TEST_PERIOD  # Counts down from a preset value in seconds during test
+    peripheral_onPeriodCntr_secs = 0  # Counts down from a preset value in seconds during test
     heater_swon_time = '...'  # Time and date when the heater is turned on
-    heater_swoff_time = '...'  # Time and date when the heater is turned off
+    heater_run_time = '...'  # Time and date when the heater is turned off
     heater_tempWindow_status = 'TEMP TOO HIGH'  # Heater temperature window flag, turn off heater at startup
     heater_state = 'OFF'  # Heater on/off state
+    heater_time_unit = ''
     
     peripheral_test = 'DISABLED'  # Heater test flag. Set to DISABLE at startup.
     ldr_sensor_state = 'LIGHT'
     
-    led_light_onPeriodCntr_secs = LED_LIGHT_ON_PERIOD # Counts down from a preset value in seconds during auto mode
+    led_light_onPeriodCntr_secs = 0 # Counts down from a preset value in seconds during auto mode
     led_light_button_color = 'red'
     led_light_button_action = 'On'
     led_light_state = 'OFF'
@@ -205,7 +218,6 @@ def setup_variables():
     auto_button_action = 'On'
     auto_mode = False
     manual_mode = False
-    
     ambient_light = 'LIGHT'
 
     ip_addr = '0,0,0,0'
@@ -223,23 +235,42 @@ def  get_id():
 # Tim 0 callback function...
 def tim0_callback(tim0):
     global ctrl_live_counter
-    global  heater_onPeriodCntr_secs
+    global  peripheral_onPeriodCntr_secs
     global led_light_onPeriodCntr_secs
     global gc_timeout_counter
+    global heater_sec_count
+    global heater_min_count
+    global heater_hour_count
+    global heater_day_count
 
     # Decrement while counters not zero
     if ctrl_live_counter != 0: # Keep alive counter
         ctrl_live_counter -= 1
         
-    if heater_onPeriodCntr_secs > 0:
-        heater_onPeriodCntr_secs -= 1
+    if peripheral_onPeriodCntr_secs > 0:
+        peripheral_onPeriodCntr_secs -= 1
         
     if led_light_onPeriodCntr_secs > 0:
         led_light_onPeriodCntr_secs -= 1
         
     if gc_timeout_counter > 0: # Garbage collection after 30 seconds
         gc_timeout_counter -= 1
-
+    
+    # Increment counters while heater is on
+    if heater_state == 'ON':
+        heater_sec_count += 1 # Increment every second
+        if heater_sec_count == 60:
+            heater_min_count += 1 # Increment every min
+            heater_sec_count = 0
+        if heater_min_count == 60:
+            heater_hour_count += 1 # Increment every hour
+            heater_min_count = 0
+        if heater_hour_count == 24:
+            heater_day_count += 1 # Increment every day
+            heater_hour_count = 0
+        if heater_day_count > 365: # Should never reach this maximum
+            heater_day_count = 0
+             
 # Get recieved signal strength...
 def get_rssi():
     global rssi
@@ -257,7 +288,7 @@ def get_rssi():
 # Create server webpage...
 def webpage(
             amb_temp, pressure, humidity, dew_point,
-            heater_state, heater_swon_time, heater_swoff_time,
+            heater_state, heater_swon_time, heater_run_time, heater_time_unit,
             auto_button_color, auto_button_action,
             ldr_sensor_state, led_light_state, led_light_button_color, led_light_button_action,
             FIRMWARE_VERSION, unit_id, rssi, local_time):
@@ -289,7 +320,7 @@ def webpage(
 
                 <center><h4>HEATER CONTROL</h4></center>
                 <p><center>Heater State: <em>{heater_state}</em></center></p>
-                <p><center>Heater On: <em>{heater_swon_time}</em> &nbsp Heater Off: <em>{heater_swoff_time}</em></center></p>
+                <p><center>Heater On Time: <em>{heater_swon_time}</em> &nbsp Heater Run Time: <em>{heater_run_time}{heater_time_unit}</em></center></p>
             
                 <center><h4>LIGHT CONTROL</h4></center>
                 <p><center>Ambient: <em>{ldr_sensor_state}</em> &nbsp Light State: <em>{led_light_state}</em></center></p>
@@ -594,7 +625,8 @@ async def serve_client(reader, writer):
     global peripheral_test
     global heater_enabled
     global heater_swon_time
-    global heater_swoff_time
+    global heater_run_time
+    global heater_time_unit
     
     global sensor_status
     
@@ -716,7 +748,7 @@ async def serve_client(reader, writer):
         #print('Sending response')
         response = webpage(
             amb_temp, pressure, humidity, dew_point,
-            heater_state, heater_swon_time, heater_swoff_time,
+            heater_state, heater_swon_time, heater_run_time, heater_time_unit,
             auto_button_color, auto_button_action,
             ldr_sensor_state, led_light_state, led_light_button_color, led_light_button_action,
             FIRMWARE_VERSION, unit_id, rssi, local_time) % stateis
@@ -731,7 +763,7 @@ async def serve_client(reader, writer):
             gc.collect()
             print("Error...freeing memory: ", gc.mem_free())
 
-# Turn status led on or off...
+# Turn status LED on or off...
 def setup_status_led(action):
     global status_led_state
     
@@ -742,7 +774,7 @@ def setup_status_led(action):
         status_led.on() # Inverted, LED off
         status_led_state = 'OFF'
         
-# Flash LED at rate defined...
+# Flash status LED at rate defined...
 def blink_led(frequency=0.5, num_blinks=3):
     for _ in range(num_blinks):
         setup_status_led(ON)  # Turn on
@@ -750,7 +782,7 @@ def blink_led(frequency=0.5, num_blinks=3):
         setup_status_led(OFF)  # Turn off
         time.sleep(frequency)
 
-# Turn heaters on or off...
+# Turn heaters (AC and DC) on or off...
 def setup_heater(action):
     global heater_state
     
@@ -761,7 +793,7 @@ def setup_heater(action):
         heater.off() # Turn off
         heater_state = 'OFF'
 
-# Turn LED light on or off...
+# Turn LED spot light on or off...
 def setup_led_light(action):
     global led_light_state
     
@@ -800,8 +832,8 @@ def ldr_sensor_interrupt_handler(pin):
     global ldr_int_flag
     global interrupt_pin
     
-    ldr_int_flag = HIGH
-    interrupt_pin = pin
+    ldr_int_flag = HIGH # Set high every time an interrupt occurs
+    interrupt_pin = pin # Pin is the GPIO that issued the interrupt
     
 # Main loop
 async def main():
@@ -812,11 +844,16 @@ async def main():
     global wlan_disconnect_time
     global wlan_connect_time
     
-    global heater_onPeriodCntr_secs
+    global peripheral_onPeriodCntr_secs
     global heater_state
     global heater_tempWindow_status
     global heater_swon_time
-    global heater_swoff_time
+    global heater_run_time
+    global heater_sec_count
+    global heater_min_count
+    global heater_hour_count
+    global heater_day_count
+    global heater_time_unit
     
     global sensor_status
     global status_led_state
@@ -983,25 +1020,26 @@ async def main():
         if peripheral_test == 'ENABLED':
             if first_pass == False:
                 #print("Turning on peripherals for test")
-                heater_onPeriodCntr_secs = PERIPHERAL_TEST_PERIOD  # Preset on period
-                setup_heater(ON)  # Turn on heaterS
+                peripheral_onPeriodCntr_secs = PERIPHERAL_TEST_PERIOD  # Preset on period
+                setup_heater(ON)  # Turn on heaters
                 setup_led_light(ON) # Turn on LED light
                 result = "{}:{}:{}".format(local_time[4], local_time[5], local_time[6])  # Get RTC time
                 if result == '':
                     heater_swon_time = 'Time unavailable...'
                 else:
                     heater_swon_time = result
-                    heater_swoff_time = '...'
+                    heater_run_time = '...'
                 first_pass = True
                 
-            elif first_pass == True and heater_onPeriodCntr_secs > 0:
-                print("Peripheral on period count: ", heater_onPeriodCntr_secs)
+            elif first_pass == True and peripheral_onPeriodCntr_secs > 0:
+                #print("Peripheral on period count: ", peripheral_onPeriodCntr_secs)
+                heater_run_time = str(peripheral_onPeriodCntr_secs)
                 
-            elif first_pass == True and heater_onPeriodCntr_secs <= 0: 
-                print("Heater test complete, turning off peripherals")
+            elif first_pass == True and peripheral_onPeriodCntr_secs <= 0: 
+                #print("Heater test complete, turning off peripherals")
                 setup_heater(OFF)  # Turn off heaters
                 setup_led_light(OFF) # Turn off LED Light 
-                heater_swoff_time = '...'
+                heater_run_time = '...'
                 heater_swon_time = '...'
                 await asyncio.sleep(1)
                 peripheral_test = 'DISABLED'
@@ -1009,7 +1047,7 @@ async def main():
                 if auto_mode == True:
                     led_light_flag = LOW
                 
-            wdt.feed()  # Keep watch dog from triggering every second
+        wdt.feed()  # Keep watch dog from triggering every second
         
         # Turn on heaters if temperature good...
         if heater_tempWindow_status == 'TEMP GOOD' and heater_state == 'OFF':
@@ -1019,16 +1057,31 @@ async def main():
                 heater_swon_time = 'Time unavailable...'
             else:
                 heater_swon_time = result # Record RTC time
-            heater_swoff_time = '...'
+            heater_run_time = '...'
+        
+        # Calculate web page heater on run time value
+        if heater_tempWindow_status == 'TEMP GOOD' and heater_state == 'ON':
+            if heater_day_count > 0:
+                heater_run_time = str(heater_day_count)
+                heater_time_unit = 'days'
+            elif heater_hour_count > 0:
+                heater_run_time = str(heater_hour_count)
+                heater_time_unit = 'hours'
+            elif heater_min_count > 0:
+                heater_run_time = str(heater_min_count)
+                heater_time_unit = 'mins'
+            elif heater_sec_count > 0:
+                heater_run_time = str(heater_sec_count)
+                heater_time_unit = 'secs'
               
         # Check if temperature rises above threshold...
         if heater_tempWindow_status == 'TEMP TOO HIGH' and heater_state == 'ON' and peripheral_test == 'DISABLED':
             setup_heater(OFF)  # Turn off heaters
             result = '{}:{}:{}'.format(local_time[4], local_time[5], local_time[6])  # Get RTC time
             if result == '':
-                heater_swoff_time = 'Time unavailable...'
+                heater_run_time = 'Time unavailable...'
             else:
-                heater_swoff_time = result # Record RTC time
+                heater_run_time = result # Record RTC time
         
         #Print wlan flags
         #print('wlan_connected:', wlan_connected)
@@ -1065,4 +1118,5 @@ except KeyboardInterrupt:
     sys.exit()
 finally:
     asyncio.new_event_loop()  # Reset the event loop and return it.
+
 
