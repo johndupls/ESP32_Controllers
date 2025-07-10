@@ -1,11 +1,11 @@
 """
     BME Temperature Sensor with Wi-Fi, no display
-    Version: V1.1
-    Date:2024-08-11
+    Version: V1.2
+    Date:2025-07-09
     Static IP Address: 192.168.2.xx 
 
     Updates:
-      Changed IP to address '15'
+      Window closure status added to webpage
 """
 
 # Imports
@@ -20,9 +20,10 @@ import sys
 from credentials import WIFI_NAME, WIFI_PASS
 import gc
 import errno
+import urequests
 
 # Const declarations
-FIRMWARE_VERSION = '1.1'
+FIRMWARE_VERSION = '1.2'
 INTERVAL_SEC = 0.25
 LOOP_REFRESH_SEC = 2.0
 ON = 1
@@ -33,25 +34,36 @@ ENABLED = 1
 DISABLED = 0
 UTC_OFFSET = 4 * 60 * 60  # Seconds, Ottawa offset = 4/5
 CLIENT_REFRESH_PERIOD = 30 # Seconds
-CTRL_LIVE_PERIOD = 15 # 15 Seconds
+CTRL_LIVE_PERIOD = 30 # 30 Seconds
 GC_TIMEOUT = 1800 # 30mins x 60
 STATIC_ADDR = '192.168.2.15'
+EXT_WEATHER_PERIOD = 900 # Check weather every 15 min
 
 # Global timer variables
 timer_tick = False
 first_pass = False
 local_time = ''
-ctrl_live_counter = 30 # Seconds
+ctrl_live_counter = CTRL_LIVE_PERIOD
+external_dewpoint_counter = EXT_WEATHER_PERIOD
 
 # Garbage collection timeout
 gc_timeout_counter = GC_TIMEOUT
 
-# Global sensor data variables
+# Global 'sensor' data variables
 amb_temp = ''
 pressure = ''
 humidity = ''
-dew_point = ''
+sensor_dewpoint = ''
 sensor_status = 'Unknown'
+
+# Global 'external' data variables
+external_temp = ''
+external_humidity = ''
+external_pressure = ''
+external_dewpoint = ''
+external_weather = ''
+window_permissions = ''
+API_key = '22f3788997c8b8ae89d3f787d4be2bfc' 
 
 #Global controller variables
 unit_id = ''
@@ -101,6 +113,7 @@ rtc = RTC()
 ssid = WIFI_NAME
 password = WIFI_PASS
 
+# Get unit id
 def  get_id():
     global unit_id
     
@@ -108,28 +121,35 @@ def  get_id():
     id = id.split(".")
     unit_id = id[3] # Last value in address used as ID
 
-#Cold start variable setup
+# Cold start variable setup
 def setup_variables():
     global ip_addr
     global wlan_connect_time
     global server_connect_state
     global first_pass
+    global window_permissions
 
     ip_addr = '0,0,0,0'
     wlan_connect_time = '...'
     server_connect_state = False
+    window_permissions = 'Keep closed'
 
-#Tim 0 callback function
+# Tim 0 callback function
 def tim0_callback(tim0):
     global ctrl_live_counter
     global gc_timeout_counter
+    global external_dewpoint_counter
 
     if ctrl_live_counter != 0: # Decrement while counters not zero
         ctrl_live_counter -= 1
         
     if gc_timeout_counter > 0:
         gc_timeout_counter -= 1
+
+    if external_dewpoint_counter > 0:
+        external_dewpoint_counter -= 1
         
+# Get RF sensitivity
 def get_rssi():
     global rssi
     
@@ -145,8 +165,9 @@ def get_rssi():
 
 # Create server webpage
 def webpage(
-            amb_temp, pressure, humidity, dew_point,ip_addr, FIRMWARE_VERSION, unit_id, rssi, local_time):
-    
+            amb_temp, pressure, humidity, sensor_dewpoint, ip_addr, FIRMWARE_VERSION, unit_id, rssi, local_time,
+            window_permissions, external_temp, external_pressure, external_humidity, external_dewpoint, external_weather):
+ 
     # HTML Template
     html = f"""
             <!DOCTYPE html>
@@ -166,12 +187,23 @@ def webpage(
             
             <p><center>Local Date: <em>{local_time[0]}:{local_time[1]}:{local_time[2]}</em> &nbsp Local Time: <em>{local_time[4]}:{local_time[5]}:{local_time[6]}</em></center></p>
             <p><center>Unit ID: <em>{unit_id}</em> &nbsp Signal Strength: <em>{rssi}dBm</em></center></p>
+            <p><center>IP Address:<em> {ip_addr}</em> </center></p>
             
             <p><center><h3>Sensor Data</center></h3></p> 
-            <p><center>Temperature:<em> {amb_temp}DegC</em> &nbsp Pressure:<em> {pressure}</em></center></p>
-            <p><center>Humidity:<em> {humidity}%</em> &nbsp Dew point:<em> {dew_point}DegC</em></center></p>
+            <p><center>Temperature:<em> {amb_temp}DegC</em></center></p>
+            <p><center>Pressure:<em> {pressure}</em></center></p>
+            <p><center>Humidity:<em> {humidity}%</em></center></p>
+            <p><center>Dewpoint:<em> {sensor_dewpoint}DegC</em></center></p>
             
-             <p><center>IP Address:<em> {ip_addr}</em> </center></p>
+            <p><center><h3>External Weather Data</center></h3></p>
+            <p><center>Temperature:<em> {external_temp}DegC</em></center></p>
+            <p><center>Pressure:<em> {external_pressure}hPa</em></center></p>
+            <p><center>Humidity:<em> {external_humidity}%</em></center></p>
+            <p><center>Dewpoint:<em> {external_dewpoint}DegC</em</center></p>
+            <p><center>Weather:<em> {external_weather}</em</center></p>
+            
+            <p><center><h3>Windows</center></h3></p>
+             <p><center><em> {window_permissions}</em> </center></p>
             
             </body>
             </html>
@@ -273,17 +305,17 @@ def get_sensor_data(bmp):
         print('Temp sensor error...')
         sensor_status = 'Sensor error'
 
-def dew_point_calc():
-    global amb_temp
-    global humidity
-    global dew_point
-    temp = 0.0
+# Calculate dew point
+def dewpoint_calc(temp, humidity):
+    if temp == '' or humidity == '':
+        return ''
+    else:
+        temp_dp = 0.0
+        temp_dp = float(temp) - ((100-float(humidity))/5)
+        temp_dp = round(temp_dp,2)
+        return str(temp_dp) 
 
-    temp = float(amb_temp) - ((100-float(humidity))/5)
-    temp = round(temp,2)
-    dew_point = str(temp)
-
-
+# Setup real time clock
 def setup_RTC():
     global local_time
     
@@ -361,8 +393,12 @@ async def connect_to_wifi():
         #Record time connected
         wlan_connect_time = str(local_time[0]) + ':' + str(local_time[1])  + ':' +  str(local_time[2])  + '...' +  str(local_time[4])  + ':' +  str(local_time[5]) + ':' +  str(local_time[6])
         
+        # Get weather data on start up
+        request_weather_data() #Get external sensor_dewpoint and compare to internal sensor
+        
         status = wlan.ifconfig()
         ip_addr = status[0]
+        print('IP Address: ', ip_addr)
         print('...WLAN parameters: {}\n'.format(wlan.ifconfig()) )
         wlan_connected = True
    
@@ -371,10 +407,11 @@ async def serve_client(reader, writer):
     global amb_temp
     global pressure
     global humidity
-    global dew_point
+    global sensor_dewpoint
     global FIRMWARE_VERSION
     global ip_addr
     global unit_id
+    global window_permissions
 
     wdt.feed()  # Keep watch dog from triggering
     
@@ -420,8 +457,8 @@ async def serve_client(reader, writer):
         return
 
     try:
-        response = webpage(amb_temp, pressure, humidity, dew_point,ip_addr,
-                           FIRMWARE_VERSION, unit_id, rssi, local_time)
+        response = webpage(amb_temp, pressure, humidity, sensor_dewpoint, ip_addr, FIRMWARE_VERSION, unit_id, rssi,
+                                               local_time, window_permissions, external_temp, external_pressure, external_humidity, external_dewpoint, external_weather)
         writer.write('HTTP/1.0 200 OK\r\nContent-type: text/html\r\n\r\n')
         writer.write(response)
         await writer.drain()
@@ -456,8 +493,53 @@ def wlan_test():
         print('WLAN connected, status = ', 1010)
     return wlan.status()
 
+# Check if okay to open windows. Okay if external > internal sensor dewpoint.
+def request_weather_data():
+    global window_permissions
+    global external_temp
+    global external_humidity
+    global external_pressure
+    global external_dewpoint
+    global external_weather
+        
+    # Get dew point from the web
+    url = f'http://api.openweathermap.org/data/2.5/weather?q=Ottawa,ca&appid=22f3788997c8b8ae89d3f787d4be2bfc&units=metric' # Standard mode
+    print('Fetching weather data...')
+    
+    try:
+        response = urequests.get(url)
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            print('Weather data')
+            print(f"City: {data['name']}")
+            print(f"Temperature: {data['main']['temp']}°C")
+            print(f"Pressure: {data['main']['pressure']}hPa")
+            print(f"Humidity: {data['main']['humidity']}%")
+            print(f"Weather: {data['weather'][0]['description']}")
 
-
+            external_temp = data['main']['temp']
+            external_pressure = data['main']['pressure']
+            external_humidity = data['main']['humidity']
+            external_weather = data['weather'][0]['description']
+            
+            # Calculate external sensor_dewpoint
+            external_dewpoint = dewpoint_calc(external_temp, external_humidity)
+            """
+            # Compare web sensor_dewpoint to internal sensor
+            if int(external_dewpoint) > int(sensor_dewpoint):
+                window_permissions = 'Windows may be opened'
+            else:
+                window_permissions = 'Keep windows closed'
+            """
+        else:
+            print(f"Failed to fetch data. Status code: {response.status_code}")   
+        response.close()
+            
+    except Exception as e:
+        print(f"Skipping weather request.......Error: {e}") 
+            
 # Main loop
 async def main():
     global LOOP_REFRESH_SEC
@@ -471,7 +553,9 @@ async def main():
     global wlan_reconnect
     global notConnectedCounter
     global i2c_addr_found
-    global gc_timeout_counter    
+    global gc_timeout_counter
+    global external_dewpoint_counter
+    global sensor_dewpoint
 
     # Start timer 0
     tim0.init(period=1000, mode=Timer.PERIODIC, callback=tim0_callback)
@@ -503,7 +587,7 @@ async def main():
     # Get data
     if sensor_status == 'Sensor active':
         get_sensor_data(bmp)
-        dew_point_calc()    # Calculate dew point
+        sensor_dewpoint = dewpoint_calc(amb_temp, humidity)   # Calculate dew point
     elif sensor_status == 'Sensor error':
         time.sleep(2)  # 2sec
         get_sensor_data(bmp)  # Try again
@@ -550,15 +634,20 @@ async def main():
             print('Memory free: ', gc.mem_free())
             gc_timeout_counter = GC_TIMEOUT #Preset counter
         
-        #Check controller alive counter
+        # Check controller alive counter
         if ctrl_live_counter == 0 :
             blink_led(frequency=0.05, num_blinks=1) #Flash LED
             ctrl_live_counter = CTRL_LIVE_PERIOD #Preset counter
+        
+        # Get external sensor_dewpoint
+        if external_dewpoint_counter == 0 :
+            request_weather_data() #Get external sensor_dewpoint and compare to internal sensor
+            external_dewpoint_counter = EXT_WEATHER_PERIOD #Preset counter
 
         # Refresh data
         if sensor_status == 'Sensor active':
             get_sensor_data(bmp)
-            dew_point_calc()
+            sensor_dewpoint = dewpoint_calc(amb_temp, humidity)
         elif sensor_status == 'Sensor error':
             time.sleep(2)  # 2sec
             get_sensor_data(bmp)  # Try again
@@ -567,9 +656,9 @@ async def main():
                 sys.exit()  # Reset
             
         #Print wlan flags
-        print('wlan_connected:', wlan_connected)
-        print('server_connect_state', server_connect_state)
-        print('Config:', wlan.ifconfig())
+        #print('wlan_connected:', wlan_connected)
+        #print('server_connect_state', server_connect_state)
+        #print('Config:', wlan.ifconfig())
         
         #Get RSSI
         get_rssi()
