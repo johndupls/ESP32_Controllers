@@ -35,7 +35,7 @@ import sys
 import utime
 import esp, esp32
 import bme280
-#import ota
+import ota
 import errno
 import gc
 
