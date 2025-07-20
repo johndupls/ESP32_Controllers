@@ -17,7 +17,7 @@ import machine
 from machine import Pin, I2C, WDT, Timer, RTC
 import bme280
 import sys
-from credentials import WIFI_NAME, WIFI_PASS
+from credentials import WIFI_NAME, WIFI_PASS, API_KEY
 import gc
 import errno
 import urequests
@@ -63,7 +63,7 @@ external_pressure = ''
 external_dewpoint = ''
 external_weather = ''
 window_permissions = ''
-API_key = '22f3788997c8b8ae89d3f787d4be2bfc' 
+api_key  = API_KEY 
 
 #Global controller variables
 unit_id = ''
