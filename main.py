@@ -1,9 +1,9 @@
 """
-    Water Level Monitor with WiFi V1.4
+    Water Level Monitor with WiFi V1.5
     Uses one sw input for a mechanical level sensor and  one PWM output to drive a piezo buzzer. 
     The sensor is checked periodically and if an alarm exists the controller responds in alarm mode until the alarm goes away.
     When the keep alive timeout expires the WDT is reset. 
-    Date: 2024-07-19
+    Date: 2025-07-20
     
 Note:
     Sump pump number needs to be adjusted for each new device.
@@ -23,11 +23,11 @@ Updates:
 
 # Modules
 import time
+import umail
 import ntptime
-import ubinascii
 import network
 import urequests as requests
-from credentials import WIFI_NAME, WIFI_PASS, TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_NUMBER, BASE_NUMBER
+from credentials import WIFI_NAME, WIFI_PASS, HOST_NAME, PORT_NUM, sender_email, sender_name, sender_app_password, recipient_email
 import uasyncio as asyncio
 import machine
 from machine import Pin, I2C, WDT, PWM, Timer, RTC
@@ -35,13 +35,13 @@ import sys
 import utime
 import esp, esp32
 import bme280
-import ota
+#import ota
 import errno
 import gc
 
 # Constants
 WLAN_TIMEOUT = 20 # Number of attempts to reconnect. Period = WLAN_TIMEOUT * LOOP_REFRESH_SEC
-FIRMWARE_VERSION = '1.4'
+FIRMWARE_VERSION = '1.5'
 INTERVAL_SEC = 0.25
 LOOP_REFRESH_SEC = 2.0
 WDT_TIMEOUT = 30000 # 30sec
@@ -113,13 +113,10 @@ first_pass = False
 local_time = ''
 ctrl_live_counter = 30 #Seconds
 
-# SMS variables
-recipient = BASE_NUMBER
-sender = TWILIO_NUMBER
-auth_token = TWILIO_AUTH_TOKEN
-account_sid = TWILIO_ACCOUNT_SID
-sms_message = ''
-sms_state = '...'
+# Email variables
+email_message = ''
+email_subject = f'Sump pump {SUMP_PUMP_NUMBER} level sensor'
+email_state = ''
 
 # Web-page variables
 mute_button_color = 'green' #Default 
@@ -159,32 +156,6 @@ tim0 = Timer(0)
 # Create RTC object
 rtc = RTC()
 
-# Twilio class definition
-class TwilioSMS:
-    base_url = 'https://api.twilio.com/2010-04-01'
-    
-    def __init__(self, account_sid, auth_token):
-        self.twilio_account_sid = account_sid
-        self.twilio_auth = ubinascii.b2a_base64('{sid}:{token}'.format(
-            sid=account_sid, token=auth_token)).strip()
-        
-    def create(self, body, from_, to):
-        data = 'Body={body}&From={from_}&To={to}'.format(
-            body=body, from_=from_.replace('+', '%2B'),
-            to=to.replace('+','%2B'))
-        
-        r = requests.post(
-            '{base_url}/Accounts/{sid}/Messages.json'.format(
-            base_url=self.base_url, sid=self.twilio_account_sid),
-            data = data,
-            headers = {'Authorization': b'Basic ' + self.twilio_auth,
-                       'Content-Type': 'application/x-www-form-urlencoded'})
-        print('SMS sent with status code', r.status_code)
-        print('Response: ', r.text)
-
-# Create Twilio SMS class object
-sms = TwilioSMS(account_sid, auth_token)
-
 # Cold start variable setup
 def setup_variables():
     global ip_addr
@@ -206,7 +177,6 @@ def setup_variables():
     enable_button_color = 'green' #Default
     enable_button_txt = 'DISABLE'
     
-
 #Tim 0 callback function
 def tim0_callback(tim0):
     global ctrl_live_counter
@@ -253,7 +223,7 @@ def  get_id():
     
 #Create server webpage
 def webpage(
-            amb_temp, pressure, humidity, dew_point, sms_state,
+            amb_temp, pressure, humidity, dew_point, email_state,
             alarm_state, alarm_activated_time, alarm_deactivated_time, local_time, buzzer_muted,
             buzzer_state, buzzer_enabled, buzzer_clientOnPeriod_mins, buzzer_clientOffPeriod_mins,
             mute_button_color, mute_button_txt,
@@ -287,7 +257,7 @@ def webpage(
             <center><h3>Alarm Status</h3></center>
             <p><center>Alarm state: <em>{alarm_state}</em></center></p> 
             <p><center>Alarm activated: <em>{alarm_activated_time}</em> &nbsp Alarm deactivated: <em>{alarm_deactivated_time}</em></center></p>
-            <p><center>SMS message: <em>{sms_state}</em></center></p>
+            <p><center>Email message: <em>{email_state}</em></center></p>
                           
             <p><center><h3>Water Level Status</center></h3></p>
             <p><center>Water level: <em>{water_level_state}</em></center></p>
@@ -558,13 +528,25 @@ def dew_point_calc():
     temp = round(temp,2) # Round up number
     dew_point = str(temp)
     
-def send_sms():
-    global sms_message
-    global sender
-    global recipient
-    
-    print('Attempting to send sms')
-    sms.create('Hello \r\n' + sms_message, sender, recipient)
+# Compose  sump activated email
+def send_email(message, subject):
+    # Create smtp object
+    smtp = umail.SMTP('smtp.gmail.com', 465, ssl=True) # Gmail's SSL port
+    email_subject  = 'Hello from pump 1' # Specific to each terminal
+        
+    # Send email
+    try:
+        smtp.login(sender_email, sender_app_password)
+        smtp.to(recipient_email)
+        smtp.write("From:" + sender_name + "<"+ sender_email+">\n")
+        smtp.write("Subject: " + subject + "\n")
+        smtp.write(message + "\n")
+        smtp.send()
+        print("Email Sent Successfully")
+    except Exception as e:
+        print("Failed to send email")
+    finally:
+        smtp.quit()
     
 #Connect to WiFi network
 async def connect_to_wifi():
@@ -573,6 +555,8 @@ async def connect_to_wifi():
     global wlan_connect_time
     global ip_addr
     global local_time
+    global email_message
+    global email_subject
 
     wdt.feed()  # Keep watch dog from triggering
     
@@ -585,16 +569,16 @@ async def connect_to_wifi():
     while max_wait > 0 and wlan.status() != 1010: # 1010 for ESP32
         max_wait -= 1
         print('Waiting for connection...{}'.format(max_wait))
-        time.sleep(LOOP_REFRESH_SEC)
+        await asyncio.sleep(0.5)
 
     # Handle connection error
     if wlan.status() != 1010:
-        blink_led(0.5, 1)
+        blink_led(0.1, 5)
         wlan_connected = False
         await asyncio.sleep(2) #2sec    
     else:
         # Connection successful
-        blink_led(0.5, 2)
+        blink_led(0.1, 2)
 
         # Update RTC
         t = setup_RTC()
@@ -610,10 +594,20 @@ async def connect_to_wifi():
         
         # Record time connected
         wlan_connect_time = str(local_time[0]) + ':' + str(local_time[1])  + ':' +  str(local_time[2])  + '...' +  str(local_time[4])  + ':' +  str(local_time[5]) + ':' +  str(local_time[6])
+        
+        # Get WLAN parameters
         status = wlan.ifconfig()
         ip_addr = status[0]
         print('...WLAN parameters: {}\n'.format(wlan.ifconfig()) )
+        
+        # Set connected flag
         wlan_connected = True
+        
+        email_message = "Sump pump activated"
+        send_email(email_message, email_subject)
+        
+        # Keep watchdog from triggering
+        wdt.feed()
 
 # Web client handler
 async def serve_client(reader, writer):  
@@ -635,12 +629,12 @@ async def serve_client(reader, writer):
     global mute_button_txt
     global mute_button_color
     global unit_id
-    global sms_state
+    global email_state
     
     wdt.feed() # Keep the watch dog from triggering
 
     print('Client connected')
-    blink_led(0.5, 1)
+    blink_led(0.1, 1)
     
     req_timeout = 20
     try:        
@@ -760,7 +754,7 @@ async def serve_client(reader, writer):
     
     try:
         response = webpage(
-            amb_temp, pressure, humidity, dew_point, sms_state,
+            amb_temp, pressure, humidity, dew_point, email_state,
             alarm_state, alarm_activated_time, alarm_deactivated_time, local_time, buzzer_muted,
             buzzer_state, buzzer_enabled, buzzer_clientOnPeriod_mins, buzzer_clientOffPeriod_mins,
             mute_button_color, mute_button_txt,
@@ -823,7 +817,7 @@ async def main():
     global buzzer_state
     global buzzer_swoff_time
     global buzzer_swon_time
-    global sms_message
+    global email_message
     global buzzer_muted
     global alarm_state
     global coldstart
@@ -843,7 +837,8 @@ async def main():
     global wlan_disconnect_time
     global wlan_connect_time
     global gc_timeout_counter
-    global sms_state
+    global email_state
+    global email_subject
 
     # Start timer 0
     tim0.init(period=1000, mode=Timer.PERIODIC, callback=tim0_callback)
@@ -889,8 +884,9 @@ async def main():
         get_sensor_data(bmp)  # Try again
         if sensor_status == 'Sensor error':
             blink_led(1, 15)
-            print("Exiting application:", sensor_status)
-            sys.exit()  # Reset
+            print("Resetting application:", sensor_status)
+            await asyncio.sleep(10)
+            machine.reset()  # Reset ESP
 
     # Update unit ID
     get_id() # Last value in IP addr
@@ -945,12 +941,13 @@ async def main():
             get_sensor_data(bmp)
             dew_point_calc()
         elif sensor_status == 'Sensor error':
-            time.sleep(2)  # 2sec
+            await asyncio.sleep(2)  # 2sec
             get_sensor_data(bmp)  # Try again
             if sensor_status == 'Sensor error':
-                blink_led(1, 15)
-                print("Exiting application:", sensor_status)
-                sys.exit()  # Reset
+                blink_led(0.1, 15)
+                print("Resetting ESP32...", sensor_status)
+                await asyncio.sleep(2)
+                machine.reset()  # Reset ESP
 
         # Process water level result, 'water_high' or 'water_low'
         if water_level_state == 'water_high' and alarm_state == 'inactive' and buzzer_muted == False and buzzer_enabled =='ENABLED': # Water level goes 'high'
@@ -967,15 +964,15 @@ async def main():
                 alarm_activated_time = result
                 print("Alarm activated at ", alarm_activated_time)
             alarm_deactivated_time = '...'
-                    
-            # Send SMS
+            
+            # Send Email
             if wlan_connected == True:
-                sms_message = "Alarm at sump pump " + SUMP_PUMP_NUMBER + " at " + alarm_activated_time + " \n\r Water level high, alarm activated!"
-                print("Sending alarm activated sms")
-                send_sms()
-                sms_state = 'Alarm activated message sent'
+                email_message = "Alarm at sump pump " + SUMP_PUMP_NUMBER + " at " + alarm_activated_time + " \n\r Water level high, alarm activated!"
+                print("Sending alarm activated email")
+                send_email(email_message, email_subject) 
+                email_state = 'Alarm activated message sent'
             else:
-                print("WLAN not connected, unable to send SMS")
+                print("WLAN not connected, unable to send email")
  
         if water_level_state == 'water_high' and alarm_state == 'active' and buzzer_muted == False and buzzer_enabled =='DISABLED':
             pwm0.deinit() # PWM off
@@ -996,14 +993,14 @@ async def main():
                 alarm_deactivated_time = result
                 print("Alarm deactivated at ", alarm_deactivated_time)
 
-            # Send SMS
+            # Send email
             if wlan_connected == True:
-                sms_message = "Alarm deactivated at sump pump " + SUMP_PUMP_NUMBER + " at " + alarm_deactivated_time + "\n\r Water level normal!"
-                print("Sending alarm deactivated sms")
-                send_sms()
-                sms_state = 'Alarm deactivated message sent'
+                email_message = "Alarm deactivated at sump pump " + SUMP_PUMP_NUMBER + " at " + alarm_deactivated_time + "\n\r Water level normal!"
+                print("Sending alarm deactivated email")
+                send_email(email_message, email_subject) 
+                email_state = 'Alarm deactivated message sent'
             else:
-                print("WLAN not connected, unable to send SMS")
+                print("WLAN not connected, unable to send email")
                 
         # Tasks when buzzer on and buzzer timer active
         if buzzer_timer_status == 'BUZZER_TIMER_RUN' and buzzer_state == 'ON' and buzzer_muted == False and buzzer_enabled == 'ENABLED':
@@ -1061,7 +1058,7 @@ async def main():
             server_connect_state = False  # Server flag cleared
             wlan_reconnect = True # Indicate re connection is required
             if notConnectedCounter > 10: # Check re-connect timeout counter
-                print('Resetting ESP32...')
+                print('Resetting application')
                 await asyncio.sleep(2)
                 machine.reset() # Reset ESP
             
