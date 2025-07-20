@@ -7,8 +7,8 @@
     
 Note:
     Sump pump number needs to be adjusted for each new device.
-    Sump '1' just off stairs
-    Sump '2' opposite end of house
+    Sump '1' just off stairs ('192.168.2.51')
+    Sump '2' opposite end of house ('192.168.2.52')
 
 Updates:
     BME280 temp sensor included.
@@ -56,12 +56,12 @@ BUZZER_ONTIME = 0.25 # mins
 BUZZER_OFFTIME = 0.25 # mins
 BUZZER_TIMER_RUN = 1
 BUZZER_TIMER_STOP = 0
-SUMP_PUMP_NUMBER = '1'
+SUMP_PUMP_NUMBER = '1' # Change with respect to pump
 UTC_OFFSET = 4 * 60 * 60  # Seconds, Ottawa offset = 4/5
 CLIENT_REFRESH_PERIOD = 30 # Seconds
 CTRL_LIVE_PERIOD = 15 # 15 Seconds
 GC_TIMEOUT = 1800 # 30mins x 60secs = 1800secs
-STATIC_ADDR = '192.168.2.51'
+STATIC_ADDR = '192.168.2.51' # Change with respect to position
 
 # Sensor variables
 amb_temp = ''
