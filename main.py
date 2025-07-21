@@ -7,8 +7,8 @@
     
 Note:
     Sump pump number needs to be adjusted for each new device.
-    Sump '1' just off stairs ('192.168.2.51')
-    Sump '2' opposite end of house ('192.168.2.52')
+    Sump '1' just off stairs
+    Sump '2' opposite end of house
 
 Updates:
     BME280 temp sensor included.
@@ -27,7 +27,7 @@ import umail
 import ntptime
 import network
 import urequests as requests
-from credentials import WIFI_NAME, WIFI_PASS, HOST_NAME, PORT_NUM, sender_email, sender_name, sender_app_password, recipient_email
+from credentials import WIFI_NAME, WIFI_PASS, HOST_NAME, PORT_NUM, sender_email, sender_name, sender_app_password, recipient_email, SUMP_PUMP_NUMBER, STATIC_ADDR
 import uasyncio as asyncio
 import machine
 from machine import Pin, I2C, WDT, PWM, Timer, RTC
@@ -41,7 +41,7 @@ import gc
 
 # Constants
 WLAN_TIMEOUT = 20 # Number of attempts to reconnect. Period = WLAN_TIMEOUT * LOOP_REFRESH_SEC
-FIRMWARE_VERSION = '1.5'
+FIRMWARE_VERSION = '1.6'
 INTERVAL_SEC = 0.25
 LOOP_REFRESH_SEC = 2.0
 WDT_TIMEOUT = 30000 # 30sec
@@ -56,12 +56,10 @@ BUZZER_ONTIME = 0.25 # mins
 BUZZER_OFFTIME = 0.25 # mins
 BUZZER_TIMER_RUN = 1
 BUZZER_TIMER_STOP = 0
-SUMP_PUMP_NUMBER = '1' # Change with respect to pump
 UTC_OFFSET = 4 * 60 * 60  # Seconds, Ottawa offset = 4/5
 CLIENT_REFRESH_PERIOD = 30 # Seconds
 CTRL_LIVE_PERIOD = 15 # 15 Seconds
 GC_TIMEOUT = 1800 # 30mins x 60secs = 1800secs
-STATIC_ADDR = '192.168.2.51' # Change with respect to position
 
 # Sensor variables
 amb_temp = ''
