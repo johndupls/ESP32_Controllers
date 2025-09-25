@@ -1,11 +1,16 @@
 """
     BME Temperature Sensor with Wi-Fi, no display
-    Version: V1.2
-    Date:2025-07-09
-    Static IP Address: 192.168.2.xx 
+    Version: V1.4
+    Date:2025-09-25
+    Static IP Address: 192.168.2.15 
 
     Updates:
-      Window closure status added to webpage
+        Window closure status added to webpage
+      
+    Latest Updates:
+        Added temperature sensor number
+        Added notConnectedCounter to cold start setup_variables()
+        Replaced sys.exit() with machine reset in I2C get_data() functions
 """
 
 # Imports
@@ -14,16 +19,16 @@ import network
 import ntptime
 import uasyncio as asyncio
 import machine
-from machine import Pin, I2C, WDT, Timer, RTC
+from machine import Pin, I2C, WDT, Timer, RTC, idle
 import bme280
 import sys
-from credentials import WIFI_NAME, WIFI_PASS, API_KEY
+from credentials import WIFI_NAME, WIFI_PASS, TEMP_SENSOR_NUMBER, STATIC_ADDR, API_KEY
 import gc
 import errno
 import urequests
 
 # Const declarations
-FIRMWARE_VERSION = '1.2'
+FIRMWARE_VERSION = '1.4'
 INTERVAL_SEC = 0.25
 LOOP_REFRESH_SEC = 2.0
 ON = 1
@@ -34,10 +39,9 @@ ENABLED = 1
 DISABLED = 0
 UTC_OFFSET = 4 * 60 * 60  # Seconds, Ottawa offset = 4/5
 CLIENT_REFRESH_PERIOD = 30 # Seconds
-CTRL_LIVE_PERIOD = 30 # 30 Seconds
+CTRL_LIVE_PERIOD = 120 # Flash LED every 120 seconds
 GC_TIMEOUT = 1800 # 30mins x 60
-STATIC_ADDR = '192.168.2.15'
-EXT_WEATHER_PERIOD = 900 # Check weather every 15 min
+EXT_WEATHER_PERIOD = 60 # Check weather every 15 min
 
 # Global timer variables
 timer_tick = False
@@ -63,7 +67,6 @@ external_pressure = ''
 external_dewpoint = ''
 external_weather = ''
 window_permissions = ''
-api_key  = API_KEY 
 
 #Global controller variables
 unit_id = ''
@@ -109,10 +112,6 @@ tim0 = Timer(0)
 # Create RTC object
 rtc = RTC()
 
-# Configure WiFi credentials
-ssid = WIFI_NAME
-password = WIFI_PASS
-
 # Get unit id
 def  get_id():
     global unit_id
@@ -128,11 +127,13 @@ def setup_variables():
     global server_connect_state
     global first_pass
     global window_permissions
+    global notConnectedCounter
 
     ip_addr = '0,0,0,0'
     wlan_connect_time = '...'
     server_connect_state = False
     window_permissions = 'Keep closed'
+    notConnectedCounter = 0
 
 # Tim 0 callback function
 def tim0_callback(tim0):
@@ -153,20 +154,23 @@ def tim0_callback(tim0):
 def get_rssi():
     global rssi
     
-    result = wlan.status('rssi')
-    if result <=-50 and result >= -64:
-        print('RSSI...strong signal: {}dBm'.format(result))
-    elif result <= -65 and result >= -79:
-        print('RSSI...moderate signal: {}dBm'.format(result))
-    elif result <= -80:
-        print('RSSI...exceeding minimum acceptable signal for connection: {}dBm'.format(result))
-    print("\n")
-    rssi = str(result)
+    try:
+        result = wlan.status('rssi')
+        if result <=-50 and result >= -64:
+            print('RSSI...strong signal: {}dBm'.format(result))
+        elif result <= -65 and result >= -79:
+            print('RSSI...moderate signal: {}dBm'.format(result))
+        elif result <= -80:
+            print('RSSI...exceeding minimum acceptable signal for connection: {}dBm'.format(result))
+        print("\n")
+        rssi = str(result)
+        except:
+            print('WLAN problem')
 
 # Create server webpage
 def webpage(
             amb_temp, pressure, humidity, sensor_dewpoint, ip_addr, FIRMWARE_VERSION, unit_id, rssi, local_time,
-            window_permissions, external_temp, external_pressure, external_humidity, external_dewpoint, external_weather):
+            window_permissions, external_temp, external_pressure, external_humidity, external_dewpoint, external_weather,TEMP_SENSOR_NUMBER):
  
     # HTML Template
     html = f"""
@@ -183,13 +187,14 @@ def webpage(
             </head>
                
             <body>
-            <p><center><h2>Internal Temperature Sensor {FIRMWARE_VERSION}</h2></center></p>
+        
+            <p><center><h2>Internal Temperature Sensor{TEMP_SENSOR_NUMBER} {FIRMWARE_VERSION}</h2></center></p>
             
             <p><center>Local Date: <em>{local_time[0]}:{local_time[1]}:{local_time[2]}</em> &nbsp Local Time: <em>{local_time[4]}:{local_time[5]}:{local_time[6]}</em></center></p>
             <p><center>Unit ID: <em>{unit_id}</em> &nbsp Signal Strength: <em>{rssi}dBm</em></center></p>
             <p><center>IP Address:<em> {ip_addr}</em> </center></p>
             
-            <p><center><h3>Sensor Data</center></h3></p> 
+            <p><center><h3>Internal Sensor Data</center></h3></p> 
             <p><center>Temperature:<em> {amb_temp}DegC</em></center></p>
             <p><center>Pressure:<em> {pressure}</em></center></p>
             <p><center>Humidity:<em> {humidity}%</em></center></p>
@@ -202,7 +207,7 @@ def webpage(
             <p><center>Dewpoint:<em> {external_dewpoint}DegC</em</center></p>
             <p><center>Weather:<em> {external_weather}</em</center></p>
             
-            <p><center><h3>Windows</center></h3></p>
+            <p><center><h3>Window Status</center></h3></p>
              <p><center><em> {window_permissions}</em> </center></p>
             
             </body>
@@ -359,14 +364,14 @@ async def connect_to_wifi():
 
     wlan.active(True)  # Activate interface
     wlan.ifconfig( (STATIC_ADDR, '255.255.255.0', '192.168.2.1', '192.168.2.1')) # Set static address, subnet, gateway & dns
-    wlan.connect(ssid, password)
+    wlan.connect(WIFI_NAME, WIFI_PASS)
 
     # Wait for connect or fail
     max_wait = WLAN_TIMEOUT  # 20 secs
     while max_wait > 0 and wlan.status() != 1010:  # 1010 for ESP32
         max_wait -= 1
         print('...Waiting for connection...{}'.format(max_wait))
-        time.sleep(LOOP_REFRESH_SEC)
+        await asyncio.sleep(LOOP_REFRESH_SEC)
         wdt.feed()  # Keep watch dog from triggering
 
     # Handle connection error
@@ -376,7 +381,7 @@ async def connect_to_wifi():
         await asyncio.sleep(2)  # 2sec
     else:
         # Connection successful
-        blink_led(0.5, 2)
+        blink_led(0.1, 2)
 
         # Update RTC
         t = setup_RTC()
@@ -458,7 +463,7 @@ async def serve_client(reader, writer):
 
     try:
         response = webpage(amb_temp, pressure, humidity, sensor_dewpoint, ip_addr, FIRMWARE_VERSION, unit_id, rssi,
-                                               local_time, window_permissions, external_temp, external_pressure, external_humidity, external_dewpoint, external_weather)
+                                               local_time, window_permissions, external_temp, external_pressure, external_humidity, external_dewpoint, external_weather, TEMP_SENSOR_NUMBER)
         writer.write('HTTP/1.0 200 OK\r\nContent-type: text/html\r\n\r\n')
         writer.write(response)
         await writer.drain()
@@ -473,8 +478,8 @@ async def serve_client(reader, writer):
 
 def wlan_test():
      # Handle connection status
-    if  wlan.status() != 1010:
-        print('WiFi connection error') 
+    if  wlan.status() == 1010:
+        print('WiFi connected') 
     elif wlan.status() == 1000:
         print('Link down, no connection and no activity') 
     elif wlan.status() == 1001:
@@ -489,8 +494,6 @@ def wlan_test():
             print('Link badauth, failed due to incorrect password')
     elif wlan.status() == 204:
             print('Link handshake timeout')
-    else:
-        print('WLAN connected, status = ', 1010)
     return wlan.status()
 
 # Check if okay to open windows. Okay if external > internal sensor dewpoint.
@@ -526,13 +529,13 @@ def request_weather_data():
             
             # Calculate external sensor_dewpoint
             external_dewpoint = dewpoint_calc(external_temp, external_humidity)
-            """
+            
             # Compare web sensor_dewpoint to internal sensor
-            if int(external_dewpoint) > int(sensor_dewpoint):
+            if external_dewpoint < sensor_dewpoint:
                 window_permissions = 'Windows may be opened'
             else:
                 window_permissions = 'Keep windows closed'
-            """
+            
         else:
             print(f"Failed to fetch data. Status code: {response.status_code}")   
         response.close()
@@ -567,7 +570,7 @@ async def main():
     if test_I2C() == False:
         sensor_status = 'Sensor error'
         blink_led(1, 10)
-        print('Exiting due to I2C error')
+        print('I2C error')
         sys.exit()
     else:
         sensor_status = 'Sensor active'
@@ -589,11 +592,13 @@ async def main():
         get_sensor_data(bmp)
         sensor_dewpoint = dewpoint_calc(amb_temp, humidity)   # Calculate dew point
     elif sensor_status == 'Sensor error':
-        time.sleep(2)  # 2sec
+        await asyncio.sleep(2)  # 2sec
         get_sensor_data(bmp)  # Try again
         if sensor_status == 'Sensor error':
-            blink_led(1, 15)
-            sys.exit()  # Reset
+            blink_led(0.1, 10)
+            print('Failed I2C retry...Resetting')
+            await asyncio.sleep(1)
+            machine.reset()  # Reset ESP
             
     # Update unit ID
     get_id() # Last value in IP addr    
@@ -623,7 +628,11 @@ async def main():
             print('...Web server ready...\n')
             server_connect_state = True
 
-        await asyncio.sleep(LOOP_REFRESH_SEC)  # 2 sec 
+        #print('Entering idle')
+        idle()
+        #print('2 sec sleep')
+        await asyncio.sleep(LOOP_REFRESH_SEC)  # 2 sec
+
 
         # Update RTC  global storage variable
         local_time = rtc.datetime()
@@ -649,16 +658,18 @@ async def main():
             get_sensor_data(bmp)
             sensor_dewpoint = dewpoint_calc(amb_temp, humidity)
         elif sensor_status == 'Sensor error':
-            time.sleep(2)  # 2sec
+            await asyncio.sleep(2)  # 2sec
             get_sensor_data(bmp)  # Try again
             if sensor_status == 'Sensor error':
-                blink_led(1, 15)
-                sys.exit()  # Reset
+                blink_led(0.1, 10)
+                print('Failed I2C retry...Resetting')
+                await asyncio.sleep(1)
+                machine.reset()  # Reset ESP
             
-        #Print wlan flags
-        #print('wlan_connected:', wlan_connected)
-        #print('server_connect_state', server_connect_state)
-        #print('Config:', wlan.ifconfig())
+        # Print wlan flags
+        print('wlan_connected:', wlan_connected)
+        print('server_connect_state', server_connect_state)
+        print('Config:', wlan.ifconfig())
         
         #Get RSSI
         get_rssi()
@@ -667,7 +678,7 @@ async def main():
         wifi_state  = wlan_test()
         if wifi_state != 1010: # Check if wlan connected
             wlan_disconnect_time = str(local_time[0]) + ':' + str(local_time[1])  + ':' +  str(local_time[2])  + '...' +  str(local_time[4])  + ':' +  str(local_time[5]) + ':' +  str(local_time[6])
-            print('Network connected at ', wlan_connect_time)
+            #print('Network connected at ', wlan_connect_time)
             print('Network disconnected at ', wlan_disconnect_time)
             # Config for restart
             wlan_connected = False  # Re-connect flag cleared
@@ -688,4 +699,5 @@ except KeyboardInterrupt:
     sys.exit()
 finally:
     asyncio.new_event_loop()  # Reset the event loop and return it.
+
 
