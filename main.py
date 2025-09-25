@@ -1,14 +1,15 @@
 """
-    Water Level Monitor with WiFi V1.5
+    Water Level Monitor with WiFi V1.7
     Uses one sw input for a mechanical level sensor and  one PWM output to drive a piezo buzzer. 
     The sensor is checked periodically and if an alarm exists the controller responds in alarm mode until the alarm goes away.
     When the keep alive timeout expires the WDT is reset. 
-    Date: 2025-07-20
+    Date: 2025-09-25
     
 Note:
     Sump pump number needs to be adjusted for each new device.
     Sump '1' just off stairs
     Sump '2' opposite end of house
+    Static IP addresses
 
 Updates:
     BME280 temp sensor included.
@@ -19,6 +20,9 @@ Updates:
     Add OTA programming
     Set up to use static address
     Add garbage collection
+    
+    2025-09-25
+    Control live period changed to 120
 """
 
 # Modules
@@ -35,13 +39,13 @@ import sys
 import utime
 import esp, esp32
 import bme280
-import ota
+#import ota
 import errno
 import gc
 
 # Constants
 WLAN_TIMEOUT = 20 # Number of attempts to reconnect. Period = WLAN_TIMEOUT * LOOP_REFRESH_SEC
-FIRMWARE_VERSION = '1.6'
+FIRMWARE_VERSION = '1.7'
 INTERVAL_SEC = 0.25
 LOOP_REFRESH_SEC = 2.0
 WDT_TIMEOUT = 30000 # 30sec
@@ -58,7 +62,7 @@ BUZZER_TIMER_RUN = 1
 BUZZER_TIMER_STOP = 0
 UTC_OFFSET = 4 * 60 * 60  # Seconds, Ottawa offset = 4/5
 CLIENT_REFRESH_PERIOD = 30 # Seconds
-CTRL_LIVE_PERIOD = 15 # 15 Seconds
+CTRL_LIVE_PERIOD = 120 # 15 Seconds
 GC_TIMEOUT = 1800 # 30mins x 60secs = 1800secs
 
 # Sensor variables
@@ -109,7 +113,7 @@ rssi = '' # Recieved signal strength
 timer_tick = False
 first_pass = False
 local_time = ''
-ctrl_live_counter = 30 #Seconds
+ctrl_live_counter = CTRL_LIVE_PERIOD #Seconds
 
 # Email variables
 email_message = ''
@@ -201,15 +205,18 @@ def tim0_callback(tim0):
 def get_rssi():
     global rssi
     
-    result = wlan.status('rssi')
-    if result <=-50 and result >= -64:
-        print('RSSI...strong signal: {}dBm'.format(result))
-    elif result <= -65 and result >= -79:
-        print('RSSI...moderate signal: {}dBm'.format(result))
-    elif result <= -80:
-        print('RSSI...exceeding minimum acceptable signal for connection: {}dBm'.format(result))
-    print('\n')
-    rssi = str(result)
+    try:
+        result = wlan.status('rssi')
+        if result <=-50 and result >= -64:
+            print('RSSI...strong signal: {}dBm'.format(result))
+        elif result <= -65 and result >= -79:
+            print('RSSI...moderate signal: {}dBm'.format(result))
+        elif result <= -80:
+            print('RSSI...exceeding minimum acceptable signal for connection: {}dBm'.format(result))
+        print('\n')
+        rssi = str(result)
+    except:
+        print('Network problem')
 
 # Get unit ID
 def  get_id():
@@ -567,7 +574,8 @@ async def connect_to_wifi():
     while max_wait > 0 and wlan.status() != 1010: # 1010 for ESP32
         max_wait -= 1
         print('Waiting for connection...{}'.format(max_wait))
-        await asyncio.sleep(0.5)
+        time.sleep(0.5)
+        wdt.feed()  # Keep watch dog from triggering
 
     # Handle connection error
     if wlan.status() != 1010:
@@ -652,7 +660,7 @@ async def serve_client(reader, writer):
             print('Software caused connection abort')
         return      
     
-    # Find valid heater commands within the request
+    # Find valid commands within the request
     request = str(request_line)
     print('Request:', request_line)
     
@@ -741,6 +749,8 @@ async def serve_client(reader, writer):
         stateis = 'Page refresh'
         # print(stateis)
         blink_led(0.1, 2)
+    
+    wdt.feed()  # Keep watch dog from triggering every second
 
     # Free memory
     gc.collect() # Run garbage collection
@@ -939,7 +949,7 @@ async def main():
             get_sensor_data(bmp)
             dew_point_calc()
         elif sensor_status == 'Sensor error':
-            await asyncio.sleep(2)  # 2sec
+            time.sleep(2)  # 2sec
             get_sensor_data(bmp)  # Try again
             if sensor_status == 'Sensor error':
                 blink_led(0.1, 15)
@@ -1071,3 +1081,5 @@ except KeyboardInterrupt:
     sys.exit()
 finally:
     asyncio.new_event_loop()   # Reset the event loop and return it.
+
+
