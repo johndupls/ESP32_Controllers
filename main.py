@@ -164,8 +164,8 @@ def get_rssi():
             print('RSSI...exceeding minimum acceptable signal for connection: {}dBm'.format(result))
         print("\n")
         rssi = str(result)
-        except:
-            print('WLAN problem')
+    except:
+        print('WLAN problem')
 
 # Create server webpage
 def webpage(
@@ -699,5 +699,6 @@ except KeyboardInterrupt:
     sys.exit()
 finally:
     asyncio.new_event_loop()  # Reset the event loop and return it.
+
 
 
