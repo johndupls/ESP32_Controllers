@@ -188,7 +188,7 @@ def webpage(
                
             <body>
         
-            <p><center><h2>Internal Temperature Sensor{TEMP_SENSOR_NUMBER} {FIRMWARE_VERSION}</h2></center></p>
+            <p><center><h2>Internal Temperature Sensor No:{TEMP_SENSOR_NUMBER} Ver {FIRMWARE_VERSION}</h2></center></p>
             
             <p><center>Local Date: <em>{local_time[0]}:{local_time[1]}:{local_time[2]}</em> &nbsp Local Time: <em>{local_time[4]}:{local_time[5]}:{local_time[6]}</em></center></p>
             <p><center>Unit ID: <em>{unit_id}</em> &nbsp Signal Strength: <em>{rssi}dBm</em></center></p>
@@ -699,6 +699,7 @@ except KeyboardInterrupt:
     sys.exit()
 finally:
     asyncio.new_event_loop()  # Reset the event loop and return it.
+
 
 
 
