@@ -1,7 +1,7 @@
 """
     Pond Warmer Controller with Wi-Fi 
-    Version: V1.51
-    Date: 2025-05-31
+    Version: V1.6
+    Date: 2025-09-25
     Static IP Address: 192.168.2.49
     
     Updates V1.4:
@@ -22,6 +22,13 @@
                     Check LDR to check if dark enough to turn on light in both modes
                     Heater turns on when temperature drops below the minimum and stays on continiously, no longer
                     controlled from the web page.
+    Updates V1.6
+                    Changed CTRL_LIVE_PERIOD to 120
+                    Added 'notConnectedCounter' to setup_variables() function
+                    Added 'STATIC_ADDR' to credentials import
+                    Added 'try' and 'except' to get_rssi() function
+                    Corrected wlan_test() function
+
 """
 
 # Imports
@@ -33,12 +40,12 @@ import machine
 from machine import Pin, I2C, WDT, Timer, RTC
 import bme280
 import sys
-from credentials import WIFI_NAME, WIFI_PASS
+from credentials import WIFI_NAME, WIFI_PASS, STATIC_ADDR
 import gc
 import errno
 
 # Const declarations
-FIRMWARE_VERSION = '1.51'
+FIRMWARE_VERSION = '1.6'
 WLAN_TIMEOUT = 20  # Number of attempts to connect. Period = WLAN_TIMEOUT * LOOP_REFRESH_SEC
 LOOP_REFRESH_SEC = 2.0
 REQ_TIMEOUT = 20
@@ -54,9 +61,8 @@ LED_LIGHT_ON_PERIOD = 7200  # 2*60*60 seconds
 UTC_OFFSET = 4 * 60 * 60  # Seconds, Ottawa offset = 4/5
 PERIPHERAL_TEST_PERIOD = 60  # Seconds
 CLIENT_REFRESH_PERIOD = 15 # Seconds
-CTRL_LIVE_PERIOD = 15 # 15 Seconds
+CTRL_LIVE_PERIOD = 120 # 120 Seconds
 GC_TIMEOUT = 1800 # 1800 Seconds (30mins)
-STATIC_ADDR = '192.168.2.49'
 LIGHT = 1
 DARK = 0
 BUSY = 1
@@ -196,7 +202,8 @@ def setup_variables():
     global auto_button_color
     global auto_button_action
     global auto_mode 
-    global manual_mode 
+    global manual_mode
+    global notConnectedCounter
 
     peripheral_onPeriodCntr_secs = 0  # Counts down from a preset value in seconds during test
     heater_swon_time = '...'  # Time and date when the heater is turned on
@@ -223,6 +230,7 @@ def setup_variables():
     ip_addr = '0,0,0,0'
     wlan_connect_time = '...'
     server_connect_state = False
+    notConnectedCounter = 0
     
 # Get unit ID...
 def  get_id():
@@ -275,15 +283,18 @@ def tim0_callback(tim0):
 def get_rssi():
     global rssi
     
-    result = wlan.status('rssi')
-    if result <=-50 and result >= -64:
-        print('RSSI...strong signal: {}dBm'.format(result))
-    elif result <= -65 and result >= -79:
-        print('RSSI...moderate signal: {}dBm'.format(result))
-    elif result <= -80:
-        print('RSSI...exceeding minimum acceptable signal for connection: {}dBm'.format(result))
-    print('\n')
-    rssi = str(result)
+    try:
+        result = wlan.status('rssi')
+        if result <=-50 and result >= -64:
+            print('RSSI...strong signal: {}dBm'.format(result))
+        elif result <= -65 and result >= -79:
+            print('RSSI...moderate signal: {}dBm'.format(result))
+        elif result <= -80:
+            print('RSSI...exceeding minimum acceptable signal for connection: {}dBm'.format(result))
+        print('\n')
+        rssi = str(result)
+    except:
+        print('WLAN problem')
 
 # Create server webpage...
 def webpage(
@@ -577,7 +588,8 @@ async def connect_to_wifi():
         max_wait -= 1
         print('...Waiting for connection...{}'.format(max_wait))
         await asyncio.sleep(0.5)
-
+        wdt.feed()
+        
     # Handle connection error
     if wlan.status() != 1010:
         blink_led(0.1, 5)
@@ -807,8 +819,8 @@ def setup_led_light(action):
 # Get wlan status code...
 def wlan_test():
      # Handle connection status
-    if  wlan.status() != 1010:
-        print('WiFi connection error') 
+    if  wlan.status() == 1010:
+        print('WiFi connected') 
     elif wlan.status() == 1000:
         print('Link down, no connection and no activity') 
     elif wlan.status() == 1001:
@@ -823,8 +835,6 @@ def wlan_test():
             print('Link badauth, failed due to incorrect password')
     elif wlan.status() == 204:
             print('Link handshake timeout')
-    else:
-        print("WLAN connected, status = ", 1010)
     return wlan.status()
 
 # LDR sensor interrupt handler...
@@ -864,7 +874,7 @@ async def main():
     global gc_timeout_counter
     global coldstart
 
-    global  ldr_sensor_state
+    global ldr_sensor_state
     global ldr_int_flag    
     global led_light_button_action
     global led_light_button_color
@@ -897,9 +907,8 @@ async def main():
     bmp = test_i2c()
     if bmp == False:
         sensor_status = 'Sensor error'
-        blink_led(1, 10)
-        print('Exiting application:', sensor_status)
-        sys.exit() # Reset
+        blink_led(0.1, 10)
+        print('I2C sensor failure:', sensor_status)
     else:
         sensor_status = 'Sensor active'
     
@@ -908,12 +917,12 @@ async def main():
         get_sensor_data(bmp)
         dew_point_calc()    # Calculate dew point
     elif sensor_status == 'Sensor error':
-        time.sleep(2)  # 2 sec
+        await asyncio.sleep(2)  # 2 sec
         get_sensor_data(bmp)  # Try again
         if sensor_status == 'Sensor error':
-            blink_led(1, 15)
-            print('Exiting application:', sensor_status)
-            sys.exit()  # Reset
+            blink_led(0.1, 10)
+            print('I2C sensor retry failure:', sensor_status)
+            await asyncio.sleep(2)
         
     # Update unit ID
     get_id() # Last value in IP addr
@@ -970,7 +979,7 @@ async def main():
             time.sleep(2)  # 2sec
             get_sensor_data(bmp)  # Try again to confirm
             if sensor_status == 'Sensor error':
-                blink_led(1, 15)
+                blink_led(0.1, 10)
                 print('Resetting ESP32...', sensor_status)
                 await asyncio.sleep(2)
                 machine.reset() # Reset ESP
@@ -1097,7 +1106,7 @@ async def main():
         if wifi_state != 1010:
             wlan_disconnect_time = str(local_time[0]) + ':' + str(local_time[1])  + ':' +  str(local_time[2])  + '...' +  str(local_time[4])  + ':' +  str(local_time[5]) + ':' +  str(local_time[6])
             #print('Network connected at ', wlan_connect_time)
-            #print('Network disconnected at ', wlan_disconnect_time)
+            print('Network disconnected at ', wlan_disconnect_time)
             # Config for restart
             wlan_connected = False  # Re-connect flag cleared
             server_connect_state = False  # Server flag cleared
@@ -1118,5 +1127,3 @@ except KeyboardInterrupt:
     sys.exit()
 finally:
     asyncio.new_event_loop()  # Reset the event loop and return it.
-
-
